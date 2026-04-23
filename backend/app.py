@@ -366,11 +366,25 @@ async def get_file(download_id: str):
             except Exception:
                 pass
 
+    # RFC 5987 encoding so non-ASCII characters (e.g. em-dashes from Bandcamp
+    # album titles like "— — —") don't cause a latin-1 encode error.
+    # We send both forms for maximum client compatibility:
+    #   filename=      → ASCII-safe fallback (non-ASCII bytes replaced with '?')
+    #   filename*=     → RFC 5987 UTF-8 percent-encoded (used by all modern browsers)
+    from urllib.parse import quote as _url_quote
+    zip_name_ascii    = zip_name.encode('ascii', 'replace').decode()   # '?' for non-ASCII
+    zip_name_encoded  = _url_quote(zip_name.encode('utf-8'), safe='')  # RFC 5987
+    content_disposition = (
+        f"attachment; "
+        f"filename=\"{zip_name_ascii}\"; "
+        f"filename*=UTF-8''{zip_name_encoded}"
+    )
+
     return StreamingResponse(
         stream_zip(),
         media_type='application/zip',
         headers={
-            'Content-Disposition': f'attachment; filename="{zip_name}"',
+            'Content-Disposition': content_disposition,
             'Content-Length': str(zip_size),
         }
     )
