@@ -2,6 +2,14 @@
 
 Median is a sophisticated, self-hosted music management and acquisition system. It is designed for users who want a high-quality, organized, and automated music library without the hassle of manual editing or intrusive advertisements.
 
+short brief 
+
+Smart Downloads: High-fidelity audio (FLAC / 320kbps) from YouTube, Spotify, and bandcamp.
+Zero Manual Editing: Auto-fetches cover art and metadata, embedding them directly into your tracks.
+Pure Automation: "Watched Folders" detect and download links in the background automatically.
+Instant Splitting: Automatically turns full-album videos into individual, tagged tracks using Chapters.
+Docker-Ready: One-command setup with a smart auto-cleanup system to save your disk space.
+
 
 
 
@@ -32,6 +40,8 @@ Queue Management: Add hundreds of songs or entire playlists to a download queue 
 •
 Scheduled Tasks: Built-in scheduler for periodic maintenance and automated downloads.
 
+Smart Auto-Cleanup System: Features a built-in scheduler that automatically purges temporary files and non-persistent downloads every 15 minutes to optimize storage space 
+
 🎧 Audiophile Quality
 
 •
@@ -51,50 +61,8 @@ Modern Web Interface: A clean, responsive dashboard built with React for managin
 
 
 
-🐳 Docker Deployment (Recommended)
 
-Median is designed to be Docker-native for easy setup and isolation.
-
-1. Prerequisites
-
-•
-Docker and Docker Compose installed on your system.
-
-2. Setup
-
-Create a docker-compose.yml file:
-
-YAML
-
-
-services:
-  median:
-    image: ipurplel/median:latest # Replace with your actual image tag if available
-    container_name: median
-    ports:
-      - "8080:80"
-    volumes:
-      - ./downloads:/app/downloads
-      - ./watched:/app/watched
-      - ./config:/app/config
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=UTC
-    restart: unless-stopped
-
-
-
-3. Launch
-
-Bash
-
-
-docker-compose up -d
-
-
-
-Access the UI at http://localhost:8080.
+🐳 Median is designed to be Docker-native 
 
 
 
@@ -121,20 +89,22 @@ Reverse Proxy: Nginx (included in Docker) for serving the frontend and proxying 
 
 📂 Project Structure
 
-Plain Text
 
-
-├── backend/            # FastAPI application logic
-│   ├── utils/          # Helper functions (validators, file organizers)
-│   ├── downloader.py   # Core download & yt-dlp logic
-│   ├── metadata.py     # Metadata extraction & tagging
-│   └── app.py          # API Endpoints
-├── frontend/           # React source code
-├── watched/            # Default directory for automated link monitoring
-├── Dockerfile          # Multi-stage build for the entire stack
-└── docker-compose.yml  # Deployment configuration
-
-
+├── backend/                # FastAPI application logic
+│   ├── utils/              # Helper functions (validators, file organizers)
+│   ├── app.py              # Main API entry point & endpoints
+│   ├── downloader.py       # Core download & yt-dlp logic
+│   ├── metadata_handler.py # Metadata extraction & tagging
+│   ├── db_models.py        # Database schema & models
+│   ├── queue_manager.py    # Download queue logic
+│   └── scheduler.py        # Background task scheduling
+├── frontend/               # React source code for the web UI
+├── watched/                # Directory for automated link monitoring
+├── .env                    # Environment variables configuration
+├── Dockerfile              # Multi-stage build for the entire stack
+├── docker-compose.yml      # Deployment configuration
+├── nginx.conf              # Nginx reverse proxy configuration
+└── startup.sh              # Container startup script
 
 
 
@@ -143,30 +113,10 @@ Plain Text
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-1.
-Fork the Project
-
-2.
-Create your Feature Branch (git checkout -b feature/AmazingFeature)
-
-3.
-Commit your Changes (git commit -m 'Add some AmazingFeature')
-
-4.
-Push to the Branch (git push origin feature/AmazingFeature)
-
-5.
-Open a Pull Request
 
 
 
+Developed by IPurplel
 
-📜 License
-
-Distributed under the MIT License. See LICENSE for more information.
-
-
-
-
-Developed with ❤️ by IPurplel
+It is worth noting that this project was developed entirely using AI as a proof of concept  However, for future projects, I plan to take a more hands-on development approach
 
