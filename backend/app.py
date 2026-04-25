@@ -54,6 +54,24 @@ async def lifespan(app: FastAPI):
                 'metadata': meta,
             })
 
+    # ── Auto-update yt-dlp ──────────────────────────────────────────────
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "-U",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode == 0:
+            app_logger.info("yt-dlp is up to date ✓")
+        else:
+            app_logger.warning(f"yt-dlp update check failed: {stderr.decode()}")
+    except asyncio.TimeoutError:
+        app_logger.warning("yt-dlp update timed out — skipping")
+    except Exception as e:
+        app_logger.warning(f"yt-dlp update skipped: {e}")
+    # ────────────────────────────────────────────────────────────────────
+
     set_url_callback(on_watched_url)
     _watch_task = asyncio.create_task(start_watching())
     app_logger.info("Median ready ✓")
