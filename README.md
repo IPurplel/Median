@@ -143,21 +143,6 @@ Data is stored in named Docker volumes that survive container restarts:
 | `median_database` | `/app/database` | SQLite database |
 | `median_logs` | `/app/logs` | Application logs |
 
-### Useful commands
-
-```bash
-# View live logs
-docker compose logs -f median
-
-# Stop
-docker compose down
-
-# Stop and wipe all data (⚠️ deletes downloads)
-docker compose down -v
-
-# Rebuild after an update
-docker compose build --no-cache && docker compose up -d
-```
 
 ---
 
