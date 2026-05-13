@@ -1,0 +1,236 @@
+# 🎵 Median
+
+> Self-hosted audio and video downloader. Paste a URL, pick a format, get your file.
+
+Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your own machine with Docker.
+
+---
+
+## ✨ Features
+
+| | |
+|---|---|
+| 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps |
+| 🎬 **Video** | MP4, MKV, WebM |
+| 🖼️ **Cover + Audio** | Album art merged into a video file |
+| 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers |
+| 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16 · adjustable resolution |
+| 📋 **History** | Every download logged with size and format |
+| 📊 **Statistics** | Per-platform and per-artist download totals |
+| 💾 **Backups** | One-click backup and restore |
+| 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt |
+| 🔄 **Auto-update** | yt-dlp updates itself on every startup |
+| 🔒 **Optional Auth** | Protect your instance with a bearer token |
+
+---
+
+## 🚀 Quick Start
+
+### Requirements
+
+- Docker and Docker Compose — that's it.
+
+### 1. Clone
+
+```bash
+git clone https://github.com/IPurplel/Median.git
+cd Median
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+```
+
+The defaults work out of the box. See [Configuration](#️-configuration) for all options.
+
+### 3. Start
+
+```bash
+bash startup.sh
+```
+
+Or manually:
+
+```bash
+docker compose up -d
+```
+
+Open **http://localhost:8080** 🎉
+
+---
+
+## ⚙️ Configuration
+
+All options live in `.env`. None are required — the defaults are production-ready.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `8080` | External port served by nginx |
+| `UPLOAD_FOLDER` | `/app/downloads` | Where downloaded files are stored |
+| `BACKUP_FOLDER` | `/app/backups` | Where backup ZIPs are stored |
+| `DATABASE_PATH` | `/app/database/median.db` | SQLite database path |
+| `CLEANUP_INTERVAL` | `15` | Minutes until completed downloads are auto-deleted |
+| `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
+| `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
+| `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
+| `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |
+| `LOG_FORMAT` | `text` | `text` or `json` |
+
+---
+
+## 🔒 Authentication
+
+Set `MEDIAN_API_TOKEN` in `.env` to require a bearer token on all mutating endpoints:
+
+```bash
+MEDIAN_API_TOKEN=your-secret-token
+```
+
+Requests that start, cancel, or delete downloads must include:
+
+```
+Authorization: Bearer your-secret-token
+```
+
+The UI handles this automatically when a token is configured.
+
+---
+
+## 🌐 Supported Platforms
+
+| Platform | Audio | Video | Playlists |
+|---|:---:|:---:|:---:|
+| YouTube | ✅ | ✅ | ✅ |
+| SoundCloud | ✅ | ➖ | ✅ |
+| Bandcamp | ✅ | ➖ | ✅ |
+
+Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp) may work, but only the three above are tested and officially supported.
+
+---
+
+## 📁 File Naming
+
+Files follow the `Artist Name - Title.ext` convention. Playlists create a folder with numbered tracks:
+
+```
+Artist Name - Album Name/
+  01 - Track One.mp3
+  02 - Track Two.mp3
+  03 - Track Three.mp3
+```
+
+Merged playlists produce a single file: `Artist Name - Album Name.mp3`
+
+---
+
+## 🐳 Docker Details
+
+The stack is two containers:
+
+| Container | Role |
+|---|---|
+| `median` | FastAPI app on port 5000 (internal) |
+| `median_nginx` | nginx reverse proxy, exposed on `$PORT` |
+
+Data is stored in named Docker volumes that survive container restarts:
+
+| Volume | Path | Contents |
+|---|---|---|
+| `median_downloads` | `/app/downloads` | Downloaded files |
+| `median_backups` | `/app/backups` | Database backups |
+| `median_database` | `/app/database` | SQLite database |
+| `median_logs` | `/app/logs` | Application logs |
+
+### Useful commands
+
+```bash
+# View live logs
+docker compose logs -f median
+
+# Stop
+docker compose down
+
+# Stop and wipe all data (⚠️ deletes downloads)
+docker compose down -v
+
+# Rebuild after an update
+docker compose build --no-cache && docker compose up -d
+```
+
+---
+
+## 🔌 API
+
+The full API is served at `/api/`. Key endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Server status, disk space, yt-dlp version |
+| `GET` | `/api/platforms` | Platform reachability check |
+| `POST` | `/api/validate` | Validate a URL and fetch metadata |
+| `POST` | `/api/download` | Queue a download |
+| `GET` | `/api/download/{id}/status` | Poll download status |
+| `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |
+| `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
+| `DELETE` | `/api/download/{id}` | Cancel a download |
+| `GET` | `/api/download/{id}/file` | Download the completed file as a ZIP |
+| `GET` | `/api/queue` | Active and queued downloads |
+| `GET` | `/api/history` | Completed download history |
+| `GET` | `/api/statistics` | Download statistics |
+| `POST` | `/api/backup` | Create a database backup |
+| `GET` | `/api/backup/{id}/download` | Download a backup |
+| `POST` | `/api/cover/upload` | Upload a custom cover image |
+| `POST` | `/api/cover/preview` | Preview a cover with settings applied |
+
+### Example
+
+```bash
+curl -X POST http://localhost:8080/api/download \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://soundcloud.com/artist/track",
+    "download_type": "audio",
+    "format": "mp3",
+    "bitrate": "320"
+  }'
+```
+
+---
+
+## 🛠️ Local Development
+
+No Docker needed for local development. You'll need **Python 3.11+** and **FFmpeg** installed on your system.
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure paths
+export UPLOAD_FOLDER=./downloads
+export BACKUP_FOLDER=./backups
+export DATABASE_PATH=./median.db
+export LOG_FOLDER=./logs
+
+# Start with auto-reload
+uvicorn backend.app:app --reload --port 5000
+```
+
+The frontend is served directly by FastAPI — no build step needed.
+
+---
+
+## 📦 Built With
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — media extraction
+- [FFmpeg](https://ffmpeg.org/) — audio/video processing and cover art merging
+- [FastAPI](https://fastapi.tiangolo.com/) — web framework
+- [APScheduler](https://apscheduler.readthedocs.io/) — background jobs
+- [Pillow](https://python-pillow.org/) — cover image processing
+
+---
+
+## 📄 License
+
+MIT

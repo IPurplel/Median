@@ -1,0 +1,297 @@
+import asyncio
+import json
+from typing import Optional, Dict, Any
+from backend.utils.cache_manager import metadata_cache
+from backend.utils.validators import detect_platform, is_playlist_url
+from backend.logger import app_logger
+
+_inflight: dict[str, asyncio.Lock] = {}
+
+
+async def extract_metadata(url: str, force_refresh: bool = False) -> Dict[str, Any]:
+    if not force_refresh:
+        cached = metadata_cache.get(url)
+        if cached:
+            app_logger.debug(f"Metadata cache hit: {url}")
+            return cached
+
+    lock = _inflight.setdefault(url, asyncio.Lock())
+    async with lock:
+        if not force_refresh:
+            cached = metadata_cache.get(url)
+            if cached:
+                _inflight.pop(url, None)
+                return cached
+        result = await _do_extract(url)
+        _inflight.pop(url, None)
+        return result
+
+
+async def _do_extract(url: str) -> Dict[str, Any]:
+    try:
+        import yt_dlp
+        from backend.config import settings
+
+        loop = asyncio.get_running_loop()
+        platform = detect_platform(url)
+        is_list   = is_playlist_url(url)
+
+        if is_list:
+            flat_opts = {
+                'quiet': True, 'no_warnings': True,
+                'extract_flat': 'in_playlist',
+                'skip_download': True,
+                'socket_timeout': 30,
+            }
+            def _flat():
+                with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+
+            info_flat = await loop.run_in_executor(None, _flat)
+            if not info_flat:
+                return {"error": "No metadata found"}
+
+            all_entries = list(info_flat.get('entries', []) or [])
+            max_tracks = settings.MAX_PLAYLIST_TRACKS
+            if len(all_entries) > max_tracks:
+                app_logger.warning(
+                    f"Playlist has {len(all_entries)} tracks — truncating to {max_tracks}"
+                )
+                all_entries = all_entries[:max_tracks]
+                info_flat = dict(info_flat)
+                info_flat['entries'] = all_entries
+
+            # If flat extraction didn't return per-track durations (common for
+            # Bandcamp), do a full extraction so the album's total time is
+            # accurate. Capped at ENRICH_CAP tracks to keep validation fast.
+            ENRICH_CAP = 60
+            has_durations = any((e.get('duration') or 0) > 0 for e in all_entries if e)
+            if (not has_durations) and all_entries and len(all_entries) <= ENRICH_CAP:
+                enrich_opts = {
+                    'quiet': True, 'no_warnings': True,
+                    'extract_flat': False,
+                    'skip_download': True,
+                    'socket_timeout': 60,
+                    'playlistend': len(all_entries),
+                }
+                def _enrich():
+                    try:
+                        with yt_dlp.YoutubeDL(enrich_opts) as ydl:
+                            return ydl.extract_info(url, download=False)
+                    except Exception as exc:
+                        app_logger.debug(f"Duration enrichment failed: {exc}")
+                        return None
+
+                info_full = await loop.run_in_executor(None, _enrich)
+                if info_full:
+                    full_entries = list(info_full.get('entries', []) or [])
+                    for i, fe in enumerate(full_entries):
+                        if i < len(all_entries) and fe and all_entries[i]:
+                            dur = fe.get('duration') or 0
+                            if dur:
+                                all_entries[i] = dict(all_entries[i])
+                                all_entries[i]['duration'] = dur
+                    info_flat['entries'] = all_entries
+
+            first_entry_info = None
+            if all_entries:
+                first_url = (all_entries[0] or {}).get('webpage_url') or \
+                            (all_entries[0] or {}).get('url') or ''
+                if first_url and not first_url.startswith('http'):
+                    first_url = ''
+
+                if first_url:
+                    full_opts = {
+                        'quiet': True, 'no_warnings': True,
+                        'extract_flat': False,
+                        'skip_download': True,
+                        'noplaylist': True,
+                        'socket_timeout': 20,
+                    }
+                    def _full_first(u=first_url):
+                        try:
+                            with yt_dlp.YoutubeDL(full_opts) as ydl:
+                                return ydl.extract_info(u, download=False)
+                        except Exception as exc:
+                            app_logger.debug(f"First-entry full extract failed for {u!r}: {exc}")
+                            return None
+
+                    first_entry_info = await loop.run_in_executor(None, _full_first)
+
+            metadata = _parse_metadata_playlist(info_flat, first_entry_info, url)
+
+        else:
+            full_opts = {
+                'quiet': True, 'no_warnings': True,
+                'extract_flat': False,
+                'skip_download': True,
+                'socket_timeout': 30,
+            }
+            def _single():
+                with yt_dlp.YoutubeDL(full_opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+
+            info = await loop.run_in_executor(None, _single)
+            if not info:
+                return {"error": "No metadata found"}
+            metadata = _parse_metadata_single(info, url)
+
+        metadata_cache.set(url, metadata)
+        return metadata
+
+    except Exception as e:
+        app_logger.error(f"Metadata extraction error for {url}: {e}")
+        return {"error": str(e)}
+
+
+def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url: str) -> dict:
+    entries = list(flat_info.get('entries', []) or [])
+    total_duration = int(sum((e.get('duration') or 0) for e in entries if e))
+
+    tracks = []
+    for i, entry in enumerate(entries):
+        if not entry:
+            continue
+        track_url = entry.get('webpage_url') or entry.get('url') or ''
+        if not track_url:
+            app_logger.debug(f"Playlist entry {i+1} has no URL — skipping")
+            continue
+        tracks.append({
+            'index': i + 1,
+            'title': entry.get('title') or f'Track {i+1}',
+            'artist': (
+                entry.get('artist') or entry.get('uploader') or
+                entry.get('channel') or ''
+            ),
+            'duration': int(entry.get('duration') or 0),
+            'url': track_url,
+            'thumbnail': _best_thumbnail(entry),
+        })
+
+    if not tracks:
+        app_logger.warning(f"Playlist at {url} yielded no usable tracks")
+
+    artist = (
+        flat_info.get('artist') or
+        flat_info.get('album_artist') or
+        flat_info.get('playlist_uploader') or
+        flat_info.get('uploader') or
+        flat_info.get('channel') or
+        flat_info.get('creator') or ''
+    )
+
+    if not artist and first_entry_info:
+        artist = (
+            first_entry_info.get('artist') or
+            first_entry_info.get('album_artist') or
+            first_entry_info.get('uploader') or
+            first_entry_info.get('channel') or
+            first_entry_info.get('creator') or ''
+        )
+
+    if not artist and tracks:
+        artist = tracks[0].get('artist', '')
+
+    playlist_thumb = _best_thumbnail(flat_info)
+    if not playlist_thumb and first_entry_info:
+        playlist_thumb = _best_thumbnail(first_entry_info)
+    if not playlist_thumb and tracks:
+        playlist_thumb = tracks[0].get('thumbnail', '')
+
+    return {
+        'is_playlist': True,
+        'platform': detect_platform(url),
+        'title': flat_info.get('title') or 'Unknown Playlist',
+        'artist': artist,
+        'album': flat_info.get('title') or '',
+        'thumbnail': playlist_thumb,
+        'track_count': len(tracks),
+        'total_duration': total_duration,
+        'tracks': tracks,
+        'url': url,
+        'formats': _get_available_formats(flat_info),
+    }
+
+
+def _parse_metadata_single(info: dict, url: str) -> dict:
+    formats = _get_available_formats(info)
+    return {
+        'is_playlist': False,
+        'platform': detect_platform(url),
+        'title': info.get('title') or 'Unknown',
+        'artist': (
+            info.get('artist') or
+            info.get('album_artist') or
+            info.get('uploader') or
+            info.get('channel') or
+            info.get('creator') or ''
+        ),
+        'album': info.get('album') or '',
+        'duration': int(info.get('duration') or 0),
+        'thumbnail': _best_thumbnail(info),
+        'url': url,
+        'formats': formats,
+        'available_qualities': _get_quality_options(formats),
+    }
+
+
+def _best_thumbnail(info: dict) -> str:
+    thumbs = info.get('thumbnails')
+    if thumbs and isinstance(thumbs, list):
+        https_thumbs = [
+            t for t in thumbs
+            if isinstance(t, dict) and (t.get('url') or '').startswith('https')
+        ]
+        if https_thumbs:
+            best = max(
+                https_thumbs,
+                key=lambda t: (t.get('preference') or t.get('quality') or 0,
+                               t.get('width') or 0)
+            )
+            return best.get('url') or ''
+
+    return info.get('thumbnail') or ''
+
+
+def _get_available_formats(info: dict) -> list:
+    formats = []
+    seen = set()
+
+    for fmt in (info.get('formats') or []):
+        if not fmt:
+            continue
+        key = (fmt.get('ext'), fmt.get('abr') or fmt.get('vbr'))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        fmt_info = {
+            'format_id': fmt.get('format_id', ''),
+            'ext': fmt.get('ext', ''),
+            'acodec': fmt.get('acodec', ''),
+            'vcodec': fmt.get('vcodec', ''),
+            'abr': fmt.get('abr'),
+            'vbr': fmt.get('vbr'),
+            'filesize': fmt.get('filesize') or fmt.get('filesize_approx'),
+            'quality': fmt.get('quality'),
+            'height': fmt.get('height'),
+        }
+        formats.append(fmt_info)
+
+    return formats[:20]
+
+
+def _get_quality_options(formats: list) -> dict:
+    audio_bitrates = set()
+    video_resolutions = set()
+
+    for fmt in formats:
+        if fmt.get('abr') and fmt.get('vcodec') == 'none':
+            audio_bitrates.add(int(fmt['abr']))
+        if fmt.get('height'):
+            video_resolutions.add(fmt['height'])
+
+    return {
+        'audio_bitrates': sorted(audio_bitrates, reverse=True),
+        'video_resolutions': sorted(video_resolutions, reverse=True),
+    }

@@ -1,0 +1,1016 @@
+import asyncio
+import json
+import os
+import re
+import time
+import uuid
+import secrets
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List, Literal
+
+import aiohttp
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Security, Depends, UploadFile, File, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, validator
+
+from backend.config import settings, validate_settings
+from backend.db_models import init_db, get_db, row_to_dict
+from backend.logger import app_logger
+from backend.metadata_handler import extract_metadata
+from backend.queue_manager import (
+    enqueue_download, cancel_download, get_download_status, get_queue, _cleanup_tasks
+)
+from backend.backup_manager import create_backup, get_backup_list, delete_backup
+from backend.scheduler import start_scheduler
+from backend.utils.validators import validate_url, is_valid_uuid, validate_bitrate
+from backend.utils.file_organizer import format_file_size, format_duration
+from backend.utils.ffmpeg_handler import is_ffmpeg_available
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+_bearer = HTTPBearer(auto_error=False)
+_API_TOKEN = os.environ.get("MEDIAN_API_TOKEN", "")
+
+
+def require_token(creds: HTTPAuthorizationCredentials = Security(_bearer)):
+    if not _API_TOKEN:
+        return
+    if not creds or not secrets.compare_digest(creds.credentials, _API_TOKEN):
+        raise HTTPException(401, "Unauthorized")
+
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+
+_rl_store: dict[str, list] = {}
+_RL_LIMIT = 60
+_RL_WINDOW = 60
+
+
+def _rate_check(ip: str, limit: int = _RL_LIMIT, window: int = _RL_WINDOW) -> bool:
+    now = time.time()
+    recent = [t for t in _rl_store.get(ip, []) if now - t < window]
+    if len(recent) >= limit:
+        _rl_store[ip] = recent
+        return False
+    recent.append(now)
+    _rl_store[ip] = recent
+    return True
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# ── Shared HTTP session ───────────────────────────────────────────────────────
+
+_http_session: Optional[aiohttp.ClientSession] = None
+
+CUSTOM_COVER_DIR = settings.custom_cover_path
+ALLOWED_THUMBNAIL_HOSTS = settings.ALLOWED_THUMBNAIL_HOSTS
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _http_session
+
+    validate_settings()
+
+    app_logger.info("Initializing Median...")
+    from backend.config import ensure_directories
+    ensure_directories()
+    init_db()
+    start_scheduler()
+
+    _http_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30),
+        headers={"User-Agent": "Median/1.0"},
+    )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "-U",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode == 0:
+            app_logger.info("yt-dlp is up to date")
+        else:
+            app_logger.warning(f"yt-dlp update check failed: {stderr.decode()}")
+    except asyncio.TimeoutError:
+        app_logger.warning("yt-dlp update timed out — skipping")
+    except Exception as e:
+        app_logger.warning(f"yt-dlp update skipped: {e}")
+
+    app_logger.info("Median ready")
+
+    yield
+
+    for t in list(_cleanup_tasks):
+        t.cancel()
+    from backend.scheduler import scheduler
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+    app_logger.info("Median shut down cleanly")
+
+
+app = FastAPI(title="Median", version="1.0.0", docs_url="/api/docs", lifespan=lifespan)
+
+_cors_origins = settings.cors_origins_list
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+# ── Request models ────────────────────────────────────────────────────────────
+
+class ValidateRequest(BaseModel):
+    url: str
+
+    @validator("url")
+    def url_length(cls, v):
+        if len(v) > settings.MAX_URL_LENGTH:
+            raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
+        return v
+
+
+class CoverSettings(BaseModel):
+    ratio: Literal["1:1", "16:9", "9:16", "4:3"] = "1:1"
+    resolution: Literal["low", "medium", "high", "original"] = "medium"
+    output_format: Literal["mp4", "mkv", "webm"] = "mp4"
+
+
+class DownloadRequest(BaseModel):
+    url: str
+    download_type: Literal["audio", "video", "cover_audio"]
+    format: Literal["mp3", "flac", "aac", "mp4", "mkv", "webm"]
+    bitrate: Optional[str] = ""
+    concatenate: bool = False
+    cover_settings: Optional[CoverSettings] = None
+    cover_id: Optional[str] = None
+
+    @validator("url")
+    def url_length(cls, v):
+        if len(v) > settings.MAX_URL_LENGTH:
+            raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
+        return v
+
+    @validator("bitrate")
+    def bitrate_valid(cls, v):
+        if v:
+            try:
+                validate_bitrate(v)
+            except ValueError as e:
+                raise ValueError(str(e))
+        return v
+
+    @validator("cover_id")
+    def cover_id_format(cls, v):
+        if v and not is_valid_uuid(v):
+            raise ValueError("cover_id must be a valid UUID")
+        return v
+
+
+class BackupRequest(BaseModel):
+    selection: str = "all"
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+
+
+class KeepFileRequest(BaseModel):
+    keep: bool
+
+
+class CoverPreviewRequest(BaseModel):
+    thumbnail_url: Optional[str] = None
+    cover_id: Optional[str] = None
+    ratio: str = "1:1"
+    resolution: str = "medium"
+
+    @validator("thumbnail_url")
+    def must_be_allowed_host(cls, v):
+        if v is None:
+            return v
+        from urllib.parse import urlparse
+        p = urlparse(v)
+        if p.scheme not in ("http", "https") or p.netloc not in settings.ALLOWED_THUMBNAIL_HOSTS:
+            raise ValueError("thumbnail_url host not permitted")
+        return v
+
+    @validator("cover_id")
+    def cover_id_format(cls, v):
+        if v and not is_valid_uuid(v):
+            raise ValueError("cover_id must be a valid UUID")
+        return v
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _assert_within_upload_folder(path: Path):
+    upload_root = Path(settings.UPLOAD_FOLDER).resolve()
+    try:
+        path.resolve().relative_to(upload_root)
+    except ValueError:
+        app_logger.warning(f"Access denied — path outside UPLOAD_FOLDER: {path}")
+        raise HTTPException(403, "File access denied")
+
+
+def _assert_within_cover_dir(path: Path):
+    cover_root = CUSTOM_COVER_DIR.resolve()
+    try:
+        path.resolve().relative_to(cover_root)
+    except ValueError:
+        app_logger.warning(f"Access denied — path outside cover dir: {path}")
+        raise HTTPException(400, "Invalid cover_id")
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    import shutil
+    db_ok = False
+    try:
+        db = get_db()
+        db.execute("SELECT 1")
+        db.close()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    disk = shutil.disk_usage(settings.UPLOAD_FOLDER) if os.path.exists(settings.UPLOAD_FOLDER) else None
+
+    from backend.queue_manager import active_downloads
+
+    yt_dlp_version = ""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        if proc.returncode == 0:
+            yt_dlp_version = stdout.decode().strip()
+    except Exception:
+        pass
+
+    status = "ok"
+    if not db_ok:
+        status = "degraded"
+    if not is_ffmpeg_available():
+        status = "degraded"
+
+    return {
+        "status": status,
+        "ffmpeg": is_ffmpeg_available(),
+        "db": db_ok,
+        "disk_free_gb": round(disk.free / (1024**3), 2) if disk else 0,
+        "yt_dlp_version": yt_dlp_version,
+        "active_downloads": len(active_downloads),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/platforms")
+async def platform_status():
+    platforms = {
+        "youtube":    "https://www.youtube.com",
+        "soundcloud": "https://soundcloud.com",
+        "bandcamp":   "https://bandcamp.com",
+    }
+
+    async def check_one(name: str, url: str) -> tuple:
+        session = _http_session
+        if not session:
+            return name, False
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5),
+                allow_redirects=True
+            ) as r:
+                return name, r.status < 400
+        except Exception:
+            return name, False
+
+    results = await asyncio.gather(
+        *[check_one(name, url) for name, url in platforms.items()]
+    )
+    return dict(results)
+
+
+@app.post("/api/validate")
+async def validate(req: ValidateRequest, request: Request):
+    ip = _get_client_ip(request)
+    if not _rate_check(ip, limit=_RL_LIMIT, window=_RL_WINDOW):
+        raise HTTPException(429, "Too many requests — please wait before trying again")
+
+    is_valid, platform, error = validate_url(req.url, max_length=settings.MAX_URL_LENGTH)
+    if not is_valid:
+        raise HTTPException(400, error)
+
+    meta = await extract_metadata(req.url)
+    if 'error' in meta:
+        raise HTTPException(422, meta['error'])
+
+    meta['platform'] = platform
+    if meta.get('duration'):
+        meta['duration_display'] = format_duration(meta['duration'])
+    if meta.get('total_duration'):
+        meta['total_duration_display'] = format_duration(meta['total_duration'])
+
+    return meta
+
+
+@app.post("/api/download", dependencies=[Depends(require_token)])
+async def start_download(req: DownloadRequest, request: Request):
+    ip = _get_client_ip(request)
+    if not _rate_check(ip, limit=_RL_LIMIT, window=_RL_WINDOW):
+        raise HTTPException(429, "Too many requests — please wait before trying again")
+
+    from backend.utils.validators import detect_platform as _detect
+    platform = _detect(req.url) or 'unknown'
+
+    meta = await extract_metadata(req.url)
+    if 'error' in meta:
+        raise HTTPException(422, meta['error'])
+
+    meta['platform'] = platform
+
+    cover_settings_dict = req.cover_settings.dict() if req.cover_settings else None
+
+    download_id = await enqueue_download({
+        'url': req.url,
+        'download_type': req.download_type,
+        'format': req.format,
+        'bitrate': req.bitrate,
+        'concatenate': req.concatenate,
+        'metadata': meta,
+        'cover_settings': cover_settings_dict,
+        'cover_id': req.cover_id,
+    })
+
+    return {
+        'download_id': download_id,
+        'status': 'queued',
+        'title': meta.get('title', ''),
+        'artist': meta.get('artist', ''),
+    }
+
+
+@app.get("/api/download/{download_id}/status")
+async def download_status(download_id: str):
+    status = get_download_status(download_id)
+    if not status:
+        raise HTTPException(404, "Download not found")
+    return status
+
+
+@app.get("/api/download/{download_id}/events")
+async def download_events(download_id: str, request: Request):
+    async def generator():
+        last_payload = None
+        # Safety cap so a stuck download doesn't keep the connection forever
+        max_iterations = 60 * 60 * 5  # 0.2s * this = 1 hour
+        for _ in range(max_iterations):
+            if await request.is_disconnected():
+                break
+            state = get_download_status(download_id)
+            if not state:
+                yield f"data: {json.dumps({'status': 'not_found'})}\n\n"
+                break
+            payload = json.dumps(state, sort_keys=True, default=str)
+            if payload != last_payload:
+                last_payload = payload
+                yield f"data: {payload}\n\n"
+            if state.get('status') in ('completed', 'error', 'cancelled', 'cleaned'):
+                break
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.delete("/api/download/{download_id}")
+async def cancel(download_id: str):
+    ok = cancel_download(download_id)
+    return {"cancelled": ok}
+
+
+@app.post("/api/download/{download_id}/keep")
+async def set_keep(download_id: str, req: KeepFileRequest):
+    db = get_db()
+    try:
+        db.execute(
+            "UPDATE downloads SET keep_file = ? WHERE id = ?",
+            (1 if req.keep else 0, download_id)
+        )
+        db.commit()
+    finally:
+        db.close()
+    return {"keep": req.keep}
+
+
+def _title_only(raw: str) -> str:
+    s = raw.strip()
+
+    s = re.sub(r'^\d+[\s_\-\.]+', '', s).strip()
+
+    if '_-_' in s:
+        parts = s.split('_-_', 1)
+        if parts[1].strip('_').strip():
+            s = parts[1].strip('_').strip()
+
+    elif ' - ' in s:
+        parts = s.split(' - ', 1)
+        if parts[1].strip():
+            s = parts[1].strip()
+
+    elif '_' in s and ' ' not in s:
+        candidate = re.sub(r'^[^_]+_', '', s, count=1).strip('_').strip()
+        if len(candidate) >= 3:
+            s = candidate
+
+    s = s.replace('_', ' ').strip()
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '', s).strip()
+
+    return s if s else raw.replace('_', ' ').strip()
+
+
+@app.get("/api/download/{download_id}/file")
+async def get_file(download_id: str):
+    import zipfile, tempfile
+    from backend.utils.validators import sanitize_filename
+
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM downloads WHERE id = ?", (download_id,)
+        ).fetchone()
+    finally:
+        db.close()
+
+    if not row or not row['file_path']:
+        raise HTTPException(404, "File not found")
+
+    file_path = Path(row['file_path']).resolve()
+
+    # Ensure the path is within the designated download folder
+    _assert_within_upload_folder(file_path)
+
+    if not file_path.exists():
+        raise HTTPException(410, "File has been cleaned up — please download again.")
+
+    artist = sanitize_filename(row['artist'] or '') or 'Unknown'
+    title  = sanitize_filename(row['title']  or '') or 'Download'
+    album  = sanitize_filename(row['album']  or row['title'] or '') or 'Album'
+    is_playlist = bool(row['is_playlist'])
+
+    zip_name = f"{artist} - {album}.zip" if is_playlist else f"{artist} - {title}.zip"
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+    tmp.close()
+
+    def build_zip():
+        try:
+            with zipfile.ZipFile(tmp.name, 'w', zipfile.ZIP_STORED) as zf:
+                if file_path.is_file():
+                    inner_ext = file_path.suffix
+                    if is_playlist:
+                        inner = f"{_title_only(album)}{inner_ext}"
+                    else:
+                        inner = f"{_title_only(title)}{inner_ext}"
+                    zf.write(str(file_path), inner)
+
+                elif file_path.is_dir():
+                    files = sorted(
+                        f for f in file_path.iterdir()
+                        if f.is_file() and not f.name.startswith('.')
+                    )
+                    for f in files:
+                        inner = f"{_title_only(f.stem)}{f.suffix}"
+                        zf.write(str(f), inner)
+        except FileNotFoundError:
+            raise
+
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, build_zip)
+    except FileNotFoundError:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        raise HTTPException(410, "File has been cleaned up — please download again.")
+
+    zip_size = os.path.getsize(tmp.name)
+
+    async def stream_zip():
+        try:
+            with open(tmp.name, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+    from urllib.parse import quote as _url_quote
+    zip_name_ascii    = zip_name.encode('ascii', 'replace').decode()
+    zip_name_encoded  = _url_quote(zip_name.encode('utf-8'), safe='')
+    content_disposition = (
+        f"attachment; "
+        f"filename=\"{zip_name_ascii}\"; "
+        f"filename*=UTF-8''{zip_name_encoded}"
+    )
+
+    return StreamingResponse(
+        stream_zip(),
+        media_type='application/zip',
+        headers={
+            'Content-Disposition': content_disposition,
+            'Content-Length': str(zip_size),
+        }
+    )
+
+
+@app.get("/api/download/{download_id}/tracks")
+async def list_tracks(download_id: str):
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT file_path, is_playlist, is_concatenated FROM downloads WHERE id = ?",
+            (download_id,),
+        ).fetchone()
+    finally:
+        db.close()
+
+    if not row or not row['file_path']:
+        raise HTTPException(404, "Download not found")
+
+    if row['is_concatenated']:
+        raise HTTPException(
+            400, "Download was concatenated into a single file — use Download File instead"
+        )
+
+    folder = Path(row['file_path']).resolve()
+    _assert_within_upload_folder(folder)
+
+    if not folder.is_dir():
+        raise HTTPException(400, "This download is not a multi-track folder")
+
+    MEDIA_EXTS = {'.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.mp4', '.mkv', '.webm'}
+    files = sorted(
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in MEDIA_EXTS
+    )
+    return [
+        {"name": f.name, "stem": _title_only(f.stem), "size": f.stat().st_size, "index": i + 1}
+        for i, f in enumerate(files)
+    ]
+
+
+@app.get("/api/download/{download_id}/track/{filename:path}")
+async def get_single_track(download_id: str, filename: str):
+    from urllib.parse import quote as _url_quote
+
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT file_path FROM downloads WHERE id = ?", (download_id,)
+        ).fetchone()
+    finally:
+        db.close()
+
+    if not row or not row['file_path']:
+        raise HTTPException(404, "Download not found")
+
+    folder = Path(row['file_path']).resolve()
+    _assert_within_upload_folder(folder)
+
+    if not folder.is_dir():
+        raise HTTPException(400, "Not a multi-track download")
+
+    track_path = (folder / filename).resolve()
+
+    # Security: resolved path must be inside the folder
+    try:
+        track_path.relative_to(folder)
+    except ValueError:
+        raise HTTPException(400, "Invalid track path")
+
+    _assert_within_upload_folder(track_path)
+
+    if not track_path.is_file():
+        raise HTTPException(404, "Track file not found")
+
+    name_ascii = track_path.name.encode('ascii', 'replace').decode()
+    name_encoded = _url_quote(track_path.name.encode('utf-8'), safe='')
+    content_disposition = (
+        f"attachment; filename=\"{name_ascii}\"; filename*=UTF-8''{name_encoded}"
+    )
+
+    return FileResponse(
+        str(track_path),
+        headers={"Content-Disposition": content_disposition},
+    )
+
+
+@app.get("/api/queue")
+async def queue():
+    return get_queue()
+
+
+@app.get("/api/history")
+async def history(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    search: str = Query(""),
+    sort_by: str = Query("completed_at"),
+    sort_dir: str = Query("desc"),
+    platform: str = Query(""),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+):
+    db = get_db()
+    try:
+        offset = (page - 1) * per_page
+        where = ["1=1"]
+        params = []
+
+        if search:
+            where.append("(title LIKE ? OR artist LIKE ?)")
+            params += [f"%{search}%", f"%{search}%"]
+        if platform:
+            where.append("platform = ?")
+            params.append(platform)
+        if date_from:
+            where.append("DATE(completed_at) >= ?")
+            params.append(date_from)
+        if date_to:
+            where.append("DATE(completed_at) <= ?")
+            params.append(date_to)
+
+        valid_sorts = {'completed_at', 'title', 'artist', 'platform', 'file_size'}
+        if sort_by not in valid_sorts:
+            sort_by = 'completed_at'
+        sort_dir = 'DESC' if sort_dir.lower() != 'asc' else 'ASC'
+
+        count_row = db.execute(
+            f"SELECT COUNT(*) FROM history WHERE {' AND '.join(where)}", params
+        ).fetchone()
+        total = count_row[0] if count_row else 0
+
+        rows = db.execute(
+            f"""SELECT * FROM history
+                WHERE {' AND '.join(where)}
+                ORDER BY {sort_by} {sort_dir}
+                LIMIT ? OFFSET ?""",
+            params + [per_page, offset]
+        ).fetchall()
+
+        items = [row_to_dict(r) for r in rows]
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'pages': (total + per_page - 1) // per_page,
+        }
+    finally:
+        db.close()
+
+
+@app.delete("/api/history", dependencies=[Depends(require_token)])
+async def clear_history():
+    db = get_db()
+    try:
+        db.execute("DELETE FROM history")
+        db.commit()
+    finally:
+        db.close()
+    return {"cleared": True}
+
+
+@app.get("/api/statistics")
+async def statistics():
+    db = get_db()
+    try:
+        total_row = db.execute(
+            "SELECT COUNT(*) as count, SUM(file_size) as size FROM history"
+        ).fetchone()
+
+        platform_rows = db.execute(
+            """SELECT platform, COUNT(*) as count
+               FROM history GROUP BY platform ORDER BY count DESC"""
+        ).fetchall()
+
+        artist_rows = db.execute(
+            """SELECT artist, COUNT(*) as count
+               FROM history GROUP BY artist ORDER BY count DESC LIMIT 10"""
+        ).fetchall()
+
+        rows = db.execute("""
+            SELECT DATE(completed_at) as day, COUNT(*) as count
+            FROM history
+            WHERE DATE(completed_at) >= DATE('now', '-6 days')
+            GROUP BY DATE(completed_at)
+        """).fetchall()
+        day_map = {r['day']: r['count'] for r in rows}
+        activity = [
+            {'date': (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d'),
+             'count': day_map.get((datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d'), 0)}
+            for i in range(6, -1, -1)
+        ]
+
+        top_tracks = db.execute(
+            """SELECT title, artist, COUNT(*) as downloads
+               FROM history GROUP BY title, artist
+               ORDER BY downloads DESC LIMIT 5"""
+        ).fetchall()
+
+        download_dir = Path(settings.UPLOAD_FOLDER)
+        loop = asyncio.get_running_loop()
+
+        def _calc_storage():
+            return sum(
+                f.stat().st_size for f in download_dir.rglob('*')
+                if f.is_file() and not f.name.startswith('.')
+                and not f.name.startswith('_tmp_')
+                and '.cover_cache' not in f.parts
+            ) if download_dir.exists() else 0
+
+        total_storage = await loop.run_in_executor(None, _calc_storage)
+
+        return {
+            'total_downloads': total_row['count'] or 0,
+            'total_size': total_row['size'] or 0,
+            'total_size_display': format_file_size(total_row['size'] or 0),
+            'storage_usage': total_storage,
+            'storage_display': format_file_size(total_storage),
+            'by_platform': [dict(r) for r in platform_rows],
+            'top_artists': [dict(r) for r in artist_rows],
+            'activity_7d': activity,
+            'top_tracks': [dict(r) for r in top_tracks],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/backup", dependencies=[Depends(require_token)])
+async def backup(req: BackupRequest):
+    result = await create_backup(req.selection, req.date_from, req.date_to)
+    return result
+
+
+@app.get("/api/backup")
+async def list_backups():
+    return get_backup_list()
+
+
+@app.delete("/api/backup/{backup_id}", dependencies=[Depends(require_token)])
+async def del_backup(backup_id: str):
+    ok = delete_backup(backup_id)
+    return {"deleted": ok}
+
+
+@app.get("/api/backup/{backup_id}/download")
+async def download_backup(backup_id: str):
+    db = get_db()
+    try:
+        row = db.execute("SELECT path, filename FROM backups WHERE id = ?", (backup_id,)).fetchone()
+    finally:
+        db.close()
+
+    if not row:
+        raise HTTPException(404, "Backup not found")
+
+    backup_root = Path(settings.BACKUP_FOLDER).resolve()
+    backup_path = Path(row['path']).resolve()
+    try:
+        backup_path.relative_to(backup_root)
+    except ValueError:
+        raise HTTPException(403, "Access denied")
+
+    if not backup_path.exists():
+        raise HTTPException(404, "Backup file missing")
+
+    return FileResponse(path=str(backup_path), filename=row['filename'], media_type='application/zip')
+
+
+@app.get("/api/thumbnail")
+async def thumbnail_proxy(url: str = Query(...), request: Request = None):
+    from urllib.parse import urlparse
+
+    ip = _get_client_ip(request) if request else "unknown"
+    if not _rate_check(ip, limit=120, window=60):
+        raise HTTPException(429, "Too many requests")
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or parsed.netloc not in ALLOWED_THUMBNAIL_HOSTS:
+        raise HTTPException(400, "URL not permitted")
+
+    try:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': origin + '/',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site',
+        }
+
+        session = _http_session
+        if not session:
+            raise HTTPException(503, "Service not ready")
+        async with session.get(
+            url,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+            allow_redirects=True,
+        ) as resp:
+            if resp.status != 200:
+                app_logger.warning(f"Thumbnail proxy: upstream {resp.status} for {url}")
+                raise HTTPException(502, f"Could not load thumbnail (upstream: {resp.status})")
+
+            content_type = resp.headers.get('Content-Type', '').split(';')[0].strip()
+            if not content_type.startswith('image/'):
+                app_logger.warning(
+                    f"Thumbnail proxy: upstream returned non-image "
+                    f"content-type {content_type!r} for {url}"
+                )
+                raise HTTPException(502, "Upstream returned non-image content")
+
+            data = await resp.read()
+
+        return StreamingResponse(
+            iter([data]),
+            media_type=content_type,
+            headers={
+                'Cache-Control': 'public, max-age=3600',
+                'Access-Control-Allow-Origin': '*',
+            }
+        )
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        app_logger.warning(f"Thumbnail proxy error for {url}: {e}")
+        raise HTTPException(502, f"Could not fetch thumbnail: {e}")
+
+
+@app.post("/api/cover/upload")
+async def upload_cover(file: UploadFile = File(...), request: Request = None):
+    ip = _get_client_ip(request) if request else "unknown"
+    if not _rate_check(ip, limit=20, window=60):
+        raise HTTPException(429, "Too many uploads — please wait")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "File must be an image")
+
+    data = await file.read()
+    if len(data) > settings.max_upload_size_bytes:
+        raise HTTPException(400, f"Image must be under {settings.MAX_UPLOAD_SIZE_MB} MB")
+
+    CUSTOM_COVER_DIR.mkdir(parents=True, exist_ok=True)
+
+    ext = Path(file.filename).suffix.lower() if file.filename else ".jpg"
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+
+    cover_id = str(uuid.uuid4())
+    dest = CUSTOM_COVER_DIR / f"{cover_id}{ext}"
+    dest.write_bytes(data)
+
+    return {"cover_id": cover_id, "filename": file.filename or "image"}
+
+
+@app.get("/api/cover/upload/{cover_id}")
+async def serve_cover(cover_id: str):
+    if not is_valid_uuid(cover_id):
+        raise HTTPException(400, "Invalid cover_id")
+    cover_dir = CUSTOM_COVER_DIR.resolve()
+    matches = list(cover_dir.glob(f"{cover_id}.*"))
+    if not matches:
+        raise HTTPException(404, "Cover not found")
+    match_path = matches[0].resolve()
+    # Belt-and-suspenders path containment check after UUID validation
+    _assert_within_cover_dir(match_path)
+    return FileResponse(str(match_path))
+
+
+@app.post("/api/cover/preview")
+async def cover_preview(req: CoverPreviewRequest, request: Request = None):
+    from backend.image_processor import (
+        download_cover_image, process_cover_image, get_target_dimensions
+    )
+    import imghdr
+
+    ip = _get_client_ip(request) if request else "unknown"
+    if not _rate_check(ip, limit=20, window=60):
+        raise HTTPException(429, "Too many requests — please wait")
+
+    if not req.thumbnail_url and not req.cover_id:
+        raise HTTPException(400, "Provide thumbnail_url or cover_id")
+
+    cover = None
+    tmp_path = None
+
+    if req.cover_id:
+        cover_dir = CUSTOM_COVER_DIR.resolve()
+        matches = list(cover_dir.glob(f"{req.cover_id}.*"))
+        if not matches:
+            raise HTTPException(404, "Uploaded cover not found")
+        match_path = matches[0].resolve()
+        _assert_within_cover_dir(match_path)
+        cover = str(match_path)
+    else:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_f:
+            tmp_path = tmp_f.name
+
+    try:
+        if not cover:
+            cover = await download_cover_image(req.thumbnail_url, tmp_path)
+        if not cover:
+            raise HTTPException(400, "Could not download thumbnail")
+
+        processed = await process_cover_image(cover, req.ratio, req.resolution)
+        w, h = get_target_dimensions(req.ratio, req.resolution)
+
+        import base64
+        with open(processed, 'rb') as f:
+            raw = f.read()
+            b64 = base64.b64encode(raw).decode()
+
+        ext = os.path.splitext(processed)[1].lower()
+        mime_map = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                    '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
+        mime_type = mime_map.get(ext)
+        if not mime_type:
+            detected = imghdr.what(None, h=raw[:32])
+            mime_type = f'image/{detected}' if detected else 'image/jpeg'
+
+        size = os.path.getsize(processed)
+
+        return {
+            'preview': f"data:{mime_type};base64,{b64}",
+            'dimensions': f"{w}x{h}" if w else "original",
+            'size': format_file_size(size),
+        }
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+frontend_path = Path(__file__).parent.parent / "frontend"
+
+if frontend_path.exists():
+    app.mount("/assets", StaticFiles(directory=str(frontend_path / "assets")), name="assets")
+    app.mount("/components", StaticFiles(directory=str(frontend_path / "components")), name="components")
+
+    @app.get("/styles.css")
+    async def styles():
+        return FileResponse(str(frontend_path / "styles.css"), media_type="text/css")
+
+    @app.get("/app.js")
+    async def appjs():
+        return FileResponse(str(frontend_path / "app.js"), media_type="application/javascript")
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_frontend(full_path: str = ""):
+        return FileResponse(str(frontend_path / "index.html"))
