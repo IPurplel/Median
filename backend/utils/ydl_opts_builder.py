@@ -65,14 +65,9 @@ def get_ydl_opts(
             {'key': 'EmbedThumbnail'},
         ]
         opts['postprocessors'] = postprocessors
-        # YouTube has no genre field — fall back to its first category (e.g. "Music").
-        # SoundCloud/Bandcamp have a real genre field, so that takes precedence.
-        # FFmpegMetadataPP only reads info['artist'] with no fallback, so for
-        # YouTube videos (where artist is None) we must pre-populate it here.
-        opts['parse_metadata'] = [
-            '%(genre,categories.0)s:%(genre)s',
-            '%(artist,uploader,channel,creator)s:%(artist)s',
-        ]
+        # Note: title/artist/album/year/genre are authoritatively rewritten by
+        # backend.utils.tag_writer after yt-dlp finishes, using Median's curated
+        # metadata dict. This PP chain just provides a sane baseline + cover art.
 
     elif download_type == 'video':
         if fmt == 'webm':

@@ -143,6 +143,28 @@ async def concatenate_video(
                 pass
 
 
+def _metadata_args(album_meta: Optional[Dict]) -> List[str]:
+    """Translate Median's album_meta dict into ffmpeg -metadata flags.
+
+    Empty values are skipped so we don't clobber whatever ffmpeg-copied
+    container metadata might already have."""
+    if not album_meta:
+        return []
+    args: List[str] = []
+    mapping = (
+        ('title', 'title'),
+        ('artist', 'artist'),
+        ('album', 'album'),
+        ('year', 'date'),
+        ('genre', 'genre'),
+    )
+    for key, ffmpeg_key in mapping:
+        value = (album_meta.get(key) or '').strip()
+        if value:
+            args += ['-metadata', f'{ffmpeg_key}={value}']
+    return args
+
+
 async def create_cover_audio_video(
     audio_files: List[str],
     cover_path: str,
@@ -151,7 +173,8 @@ async def create_cover_audio_video(
     cover_ratio: str = "1:1",
     cover_resolution: str = "medium",
     add_chapters: bool = True,
-    progress_callback: Optional[Callable] = None
+    progress_callback: Optional[Callable] = None,
+    album_meta: Optional[Dict] = None,
 ) -> bool:
     if not audio_files or not cover_path:
         app_logger.error("create_cover_audio_video: missing audio_files or cover_path")
@@ -211,6 +234,8 @@ async def create_cover_audio_video(
                 '-i', audio_for_merge,
             ]
 
+            meta_args = _metadata_args(album_meta)
+
             if out_ext == 'webm':
                 import subprocess as _sp
                 vp9_available = False
@@ -233,6 +258,7 @@ async def create_cover_audio_video(
                     '-map', '0:v:0',
                     '-map', '1:a:0',
                     '-shortest',
+                    *meta_args,
                     '-y',
                     output_path,
                 ]
@@ -251,6 +277,7 @@ async def create_cover_audio_video(
                     '-map', '0:v:0',
                     '-map', '1:a:0',
                     '-shortest',
+                    *meta_args,
                     '-y',
                     output_path,
                 ]
@@ -269,6 +296,7 @@ async def create_cover_audio_video(
                     '-map', '0:v:0',
                     '-map', '1:a:0',
                     '-shortest',
+                    *meta_args,
                     '-movflags', '+faststart',
                     '-y',
                     output_path,

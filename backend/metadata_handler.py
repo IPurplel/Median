@@ -144,6 +144,44 @@ async def _do_extract(url: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+def _extract_year(info: dict) -> str:
+    """Best-effort 'YYYY' from release_date / release_year / upload_date."""
+    rd = info.get('release_date') or ''
+    if rd:
+        digits = ''.join(c for c in str(rd) if c.isdigit())
+        if len(digits) >= 4:
+            return digits[:4]
+    ry = info.get('release_year')
+    if ry:
+        return str(ry)[:4]
+    ud = info.get('upload_date') or ''
+    if ud and len(str(ud)) >= 4:
+        return str(ud)[:4]
+    return ''
+
+
+def _extract_genre(info: dict) -> str:
+    """Genre with platform fallbacks.
+
+    - SoundCloud / some extractors: info['genre']
+    - YouTube: no genre, use info['categories'][0] (e.g. 'Music')
+    - Bandcamp: no genre, use info['tags'][0] (user-added tags;
+      first is conventionally the primary genre)"""
+    g = info.get('genre')
+    if g:
+        return g[0] if isinstance(g, list) and g else str(g)
+    genres = info.get('genres')
+    if isinstance(genres, list) and genres:
+        return str(genres[0])
+    cats = info.get('categories')
+    if isinstance(cats, list) and cats:
+        return str(cats[0])
+    tags = info.get('tags')
+    if isinstance(tags, list) and tags:
+        return str(tags[0])
+    return ''
+
+
 def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url: str) -> dict:
     entries = list(flat_info.get('entries', []) or [])
     total_duration = int(sum((e.get('duration') or 0) for e in entries if e))
@@ -198,12 +236,17 @@ def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url
     if not playlist_thumb and tracks:
         playlist_thumb = tracks[0].get('thumbnail', '')
 
+    year = _extract_year(flat_info) or (_extract_year(first_entry_info) if first_entry_info else '')
+    genre = _extract_genre(flat_info) or (_extract_genre(first_entry_info) if first_entry_info else '')
+
     return {
         'is_playlist': True,
         'platform': detect_platform(url),
         'title': flat_info.get('title') or 'Unknown Playlist',
         'artist': artist,
         'album': flat_info.get('title') or '',
+        'genre': genre,
+        'year': year,
         'thumbnail': playlist_thumb,
         'track_count': len(tracks),
         'total_duration': total_duration,
@@ -227,6 +270,8 @@ def _parse_metadata_single(info: dict, url: str) -> dict:
             info.get('creator') or ''
         ),
         'album': info.get('album') or '',
+        'genre': _extract_genre(info),
+        'year': _extract_year(info),
         'duration': int(info.get('duration') or 0),
         'thumbnail': _best_thumbnail(info),
         'url': url,

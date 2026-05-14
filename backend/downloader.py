@@ -17,6 +17,18 @@ from backend.concatenation_engine import (
 from backend.image_processor import download_cover_image
 from backend.logger import app_logger
 from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP
+from backend.utils.tag_writer import write_tags
+
+
+def _album_meta(metadata: dict, title: str, artist: str, album: str = '') -> dict:
+    """Bundle the curated tag fields Median wants embedded in every output."""
+    return {
+        'title': title,
+        'artist': artist,
+        'album': album or metadata.get('album', '') or '',
+        'year': metadata.get('year', '') or '',
+        'genre': metadata.get('genre', '') or '',
+    }
 
 
 CUSTOM_COVER_DIR = settings.custom_cover_path
@@ -163,6 +175,7 @@ async def download_single(
                 'artist': artist,
                 'duration': metadata.get('duration') or 0,
             }],
+            album_meta=_album_meta(metadata, title, artist),
             cover_ratio=cs.get('ratio', '1:1'),
             cover_resolution=cs.get('resolution', 'medium'),
             add_chapters=False,
@@ -194,6 +207,12 @@ async def download_single(
             except OSError:
                 pass
             raise
+
+        # Authoritative tag rewrite. yt-dlp's FFmpegMetadata fills in much of
+        # this already, but leaves album empty for YouTube and writes raw
+        # YYYYMMDD as the date — fix it here using Median's curated metadata.
+        am = _album_meta(metadata, title, artist)
+        write_tags(final_path, **am)
 
     file_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
 
@@ -338,6 +357,7 @@ async def download_playlist(
                     cover_file or '',
                     str(output_path),
                     tracks,
+                    album_meta=_album_meta(metadata, album, artist, album=album),
                     cover_ratio=cover_settings.get('ratio', '1:1') if cover_settings else '1:1',
                     cover_resolution=cover_settings.get('resolution', 'medium') if cover_settings else 'medium',
                     add_chapters=True,
@@ -348,6 +368,13 @@ async def download_playlist(
 
             if not ok:
                 raise RuntimeError("Concatenation failed")
+
+            # For audio mode the concat just copies streams, so per-track tags
+            # come along — but album/year/genre at the file level are missing.
+            # Stamp them on the merged file (cover_audio gets these via -metadata
+            # in the ffmpeg merge above).
+            if download_type == 'audio' and output_path.exists():
+                write_tags(str(output_path), **_album_meta(metadata, album, artist, album=album))
 
             file_size = os.path.getsize(str(output_path)) if output_path.exists() else 0
 
@@ -426,14 +453,19 @@ async def download_playlist(
                     cover_path = result
 
             if cover_path:
-                for audio_file in audio_files:
+                for i, audio_file in enumerate(audio_files):
                     video_out = audio_file.with_suffix(f'.{out_video_ext}')
+                    # Strip yt-dlp's "001 - " autonumber prefix when deriving a
+                    # track title from the filename
+                    raw_stem = audio_file.stem
+                    track_title = raw_stem.split(' - ', 1)[1] if ' - ' in raw_stem else raw_stem
                     try:
                         ok = await create_cover_audio_video(
                             audio_files=[str(audio_file)],
                             cover_path=cover_path,
                             output_path=str(video_out),
-                            tracks_meta=[{'title': audio_file.stem, 'artist': artist, 'duration': 0}],
+                            tracks_meta=[{'title': track_title, 'artist': artist, 'duration': 0}],
+                            album_meta=_album_meta(metadata, track_title, artist, album=album),
                             cover_ratio=cover_ratio,
                             cover_resolution=cover_res,
                             add_chapters=False,
@@ -457,6 +489,22 @@ async def download_playlist(
                         app_logger.debug(f"Removed stray thumbnail: {img_file.name}")
                     except Exception:
                         pass
+
+            # For audio mode, yt-dlp tagged each track individually but
+            # left album empty. Stamp album/year/genre on every track using
+            # the playlist-level metadata.
+            if download_type == 'audio':
+                AUDIO_TAG_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus'}
+                for audio_file in album_folder.iterdir():
+                    if audio_file.is_file() and audio_file.suffix.lower() in AUDIO_TAG_EXTS:
+                        # Leave title and artist alone — yt-dlp populated them
+                        # per-track. We just fill in the missing album-level fields.
+                        write_tags(
+                            str(audio_file),
+                            album=album,
+                            year=metadata.get('year', '') or '',
+                            genre=metadata.get('genre', '') or '',
+                        )
 
         MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm', '.ogg'}
         files = [
