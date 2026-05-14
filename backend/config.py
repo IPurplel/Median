@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     LOG_BACKUP_COUNT: int = 7
     LOG_FORMAT: Literal["text", "json"] = "text"
     COVER_DEFAULT_RATIO: str = "1:1"
-    COVER_DEFAULT_RESOLUTION: str = "medium"
+    COVER_DEFAULT_RESOLUTION: str = "original"
     COVER_CACHE_MAX_MB: int = 500
 
     BLURRY_PADDING_BLUR_RADIUS: int = 40

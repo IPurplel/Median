@@ -177,7 +177,7 @@ async def download_single(
             }],
             album_meta=_album_meta(metadata, title, artist),
             cover_ratio=cs.get('ratio', '1:1'),
-            cover_resolution=cs.get('resolution', 'medium'),
+            cover_resolution=cs.get('resolution', 'original'),
             add_chapters=False,
         )
 
@@ -359,7 +359,7 @@ async def download_playlist(
                     tracks,
                     album_meta=_album_meta(metadata, album, artist, album=album),
                     cover_ratio=cover_settings.get('ratio', '1:1') if cover_settings else '1:1',
-                    cover_resolution=cover_settings.get('resolution', 'medium') if cover_settings else 'medium',
+                    cover_resolution=cover_settings.get('resolution', 'original') if cover_settings else 'original',
                     add_chapters=True,
                     progress_callback=progress_callback
                 )
@@ -428,7 +428,7 @@ async def download_playlist(
             cs = cover_settings or {}
             out_video_ext = cs.get('output_format', 'mp4')
             cover_ratio = cs.get('ratio', '1:1')
-            cover_res    = cs.get('resolution', 'medium')
+            cover_res    = cs.get('resolution', 'original')
 
             AUDIO_EXTS = {'.mp3', '.m4a', '.aac', '.flac', '.ogg'}
             audio_files = sorted(

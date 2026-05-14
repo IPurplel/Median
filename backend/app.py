@@ -149,7 +149,7 @@ class ValidateRequest(BaseModel):
 
 class CoverSettings(BaseModel):
     ratio: Literal["1:1", "16:9", "9:16", "4:3"] = "1:1"
-    resolution: Literal["low", "medium", "high", "original"] = "medium"
+    resolution: Literal["low", "medium", "high", "original"] = "original"
     output_format: Literal["mp4", "mkv", "webm"] = "mp4"
 
 
@@ -198,7 +198,7 @@ class CoverPreviewRequest(BaseModel):
     thumbnail_url: Optional[str] = None
     cover_id: Optional[str] = None
     ratio: str = "1:1"
-    resolution: str = "medium"
+    resolution: str = "original"
 
     @validator("thumbnail_url")
     def must_be_allowed_host(cls, v):

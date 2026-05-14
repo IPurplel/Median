@@ -171,7 +171,7 @@ async def create_cover_audio_video(
     output_path: str,
     tracks_meta: List[Dict],
     cover_ratio: str = "1:1",
-    cover_resolution: str = "medium",
+    cover_resolution: str = "original",
     add_chapters: bool = True,
     progress_callback: Optional[Callable] = None,
     album_meta: Optional[Dict] = None,
