@@ -38,26 +38,41 @@ def get_ydl_opts(
 
     if download_type == 'audio':
         opts['format'] = 'bestaudio/best'
+        opts['writethumbnail'] = True
         if fmt == 'flac':
-            opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'}]
+            postprocessors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'}]
         elif fmt == 'mp3':
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}
             if bitrate_val:
                 pp['preferredquality'] = bitrate_val
-            opts['postprocessors'] = [pp]
+            postprocessors = [pp]
         elif fmt in ('aac', 'm4a'):
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'aac'}
             if bitrate_val:
                 pp['preferredquality'] = bitrate_val
-            opts['postprocessors'] = [pp]
+            postprocessors = [pp]
         elif fmt == 'opus':
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'opus', 'preferredquality': '0'}
-            opts['postprocessors'] = [pp]
+            postprocessors = [pp]
         else:
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}
             if bitrate_val:
                 pp['preferredquality'] = bitrate_val
-            opts['postprocessors'] = [pp]
+            postprocessors = [pp]
+        postprocessors += [
+            {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+            {'key': 'FFmpegMetadata', 'add_metadata': True},
+            {'key': 'EmbedThumbnail'},
+        ]
+        opts['postprocessors'] = postprocessors
+        # YouTube has no genre field — fall back to its first category (e.g. "Music").
+        # SoundCloud/Bandcamp have a real genre field, so that takes precedence.
+        # FFmpegMetadataPP only reads info['artist'] with no fallback, so for
+        # YouTube videos (where artist is None) we must pre-populate it here.
+        opts['parse_metadata'] = [
+            '%(genre,categories.0)s:%(genre)s',
+            '%(artist,uploader,channel,creator)s:%(artist)s',
+        ]
 
     elif download_type == 'video':
         if fmt == 'webm':
@@ -87,7 +102,7 @@ def get_ydl_opts(
         opts['writethumbnail'] = True
         opts['postprocessors'].append({'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'})
 
-    if download_type != 'cover_audio':
+    if download_type == 'video':
         opts['writethumbnail'] = False
 
     return opts

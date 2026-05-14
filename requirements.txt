@@ -9,3 +9,4 @@ python-dotenv==1.0.1
 pydantic==2.7.1
 pydantic-settings==2.2.1
 python-json-logger==2.0.7
+mutagen>=1.47.0
