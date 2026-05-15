@@ -37,11 +37,14 @@ def parse_ratio(ratio_str: str) -> Tuple[int, int]:
 
 
 def get_target_dimensions(ratio: str, resolution: str) -> Tuple[int, int]:
-    r_w, r_h = parse_ratio(ratio)
-
     if resolution == 'original':
         return None, None
+    # Original ratio resolves to the source image's actual size — the caller
+    # has to read the processed file's dimensions to show a real W×H.
+    if ratio == 'original':
+        return None, None
 
+    r_w, r_h = parse_ratio(ratio)
     base = RESOLUTION_MAP.get(resolution, (1280, 720))
 
     w = base[0]
@@ -98,7 +101,7 @@ async def process_cover_image(
     use_cache: bool = True
 ) -> Optional[str]:
     # Validate ratio/resolution against known values so unknown keys don't crash
-    if ratio not in RATIO_MAP:
+    if ratio not in RATIO_MAP and ratio != 'original':
         app_logger.warning(f"Unknown cover ratio {ratio!r}, falling back to 1:1")
         ratio = '1:1'
     if resolution not in RESOLUTION_MAP and resolution != 'original':
@@ -107,6 +110,12 @@ async def process_cover_image(
 
     COVER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # No-op fast path: original ratio AND original resolution means
+    # "use the source as-is", so nothing to render.
+    if resolution == 'original' and ratio == 'original':
+        return image_path
+    # Original resolution alone still keeps the source untouched — ratio
+    # selection has no meaning without a target size to crop/pad into.
     if resolution == 'original':
         return image_path
 
@@ -143,6 +152,28 @@ def _process_image_sync(
             img.thumbnail((4096, 4096), Image.LANCZOS)
 
         orig_w, orig_h = img.size
+        img = img.convert('RGB')
+
+        if ratio == 'original':
+            # Keep the source aspect ratio; cap the longest side at the
+            # resolution's longer dim so the cover fits the target frame
+            # without cropping or padding.
+            base = RESOLUTION_MAP.get(resolution, (1280, 720))
+            max_dim = max(base)
+            longest = max(orig_w, orig_h)
+            if longest <= max_dim:
+                # Source already fits — return it untouched.
+                return image_path
+            scale = max_dim / longest
+            new_w = max(2, int(orig_w * scale))
+            new_h = max(2, int(orig_h * scale))
+            new_w = new_w - (new_w % 2)
+            new_h = new_h - (new_h % 2)
+            result = img.resize((new_w, new_h), Image.LANCZOS)
+            result.save(output_path, 'JPEG', quality=92, optimize=True)
+            app_logger.debug(f"Cover processed (original ratio): {output_path} ({new_w}x{new_h})")
+            return output_path
+
         orig_ratio = orig_w / orig_h
 
         target_w, target_h = get_target_dimensions(ratio, resolution)
@@ -151,8 +182,6 @@ def _process_image_sync(
 
         r_w, r_h = parse_ratio(ratio)
         target_ratio = r_w / r_h
-
-        img = img.convert('RGB')
 
         ratio_diff = abs(orig_ratio - target_ratio) / target_ratio
 

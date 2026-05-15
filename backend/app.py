@@ -148,7 +148,7 @@ class ValidateRequest(BaseModel):
 
 
 class CoverSettings(BaseModel):
-    ratio: Literal["1:1", "16:9", "9:16", "4:3"] = "1:1"
+    ratio: Literal["1:1", "16:9", "9:16", "4:3", "original"] = "1:1"
     resolution: Literal["low", "medium", "high", "original"] = "original"
     output_format: Literal["mp4", "mkv", "webm"] = "mp4"
 
@@ -982,6 +982,16 @@ async def cover_preview(req: CoverPreviewRequest, request: Request = None):
             mime_type = f'image/{detected}' if detected else 'image/jpeg'
 
         size = os.path.getsize(processed)
+
+        # 'original' ratio or resolution skips the fixed-dim calc; read the
+        # actual dimensions back from the file so the preview shows real W×H.
+        if not w:
+            try:
+                from PIL import Image as _PILImage
+                with _PILImage.open(processed) as _im:
+                    w, h = _im.size
+            except Exception:
+                w, h = None, None
 
         return {
             'preview': f"data:{mime_type};base64,{b64}",
