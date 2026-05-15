@@ -505,8 +505,29 @@ async def download_playlist(
                     except Exception as e:
                         app_logger.error(f"cover_audio merge failed for {audio_file.name}: {e}")
 
+            # AIMP (and most music players) fall back to a sidecar cover.jpg /
+            # cover.png in the same folder when a file's own tags don't carry
+            # cover art — and MKV cover attachments specifically don't surface
+            # in AIMP. Keep the cover as cover.<ext> in the album folder so
+            # MKV cover+audio outputs still get album art in player libraries.
+            sidecar_kept: Optional[Path] = None
+            if cover_path and os.path.exists(cover_path):
+                src = Path(cover_path)
+                ext = src.suffix.lower()
+                if ext not in ('.jpg', '.jpeg', '.png'):
+                    ext = '.jpg'  # other formats are unreliable as sidecars
+                target = album_folder / f'cover{ext}'
+                try:
+                    if src.resolve() != target.resolve():
+                        import shutil as _sh
+                        _sh.copyfile(src, target)
+                    sidecar_kept = target
+                except Exception as e:
+                    app_logger.warning(f"sidecar cover.jpg copy failed: {e}")
+
             for img_file in album_folder.iterdir():
-                if img_file.suffix.lower() in IMAGE_EXTS:
+                if (img_file.suffix.lower() in IMAGE_EXTS
+                        and (sidecar_kept is None or img_file != sidecar_kept)):
                     try:
                         img_file.unlink()
                     except Exception:
