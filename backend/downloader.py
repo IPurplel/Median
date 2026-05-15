@@ -470,10 +470,20 @@ async def download_playlist(
             if cover_path:
                 for i, audio_file in enumerate(audio_files):
                     video_out = audio_file.with_suffix(f'.{out_video_ext}')
-                    # Strip yt-dlp's "001 - " autonumber prefix when deriving a
-                    # track title from the filename
-                    raw_stem = audio_file.stem
-                    track_title = raw_stem.split(' - ', 1)[1] if ' - ' in raw_stem else raw_stem
+                    # Prefer the already-cleaned track title from extracted
+                    # metadata. Fall back to the filename only if we ran out
+                    # of metadata entries — parsing the filename here would
+                    # re-introduce the "Artist - Song" prefix yt-dlp's
+                    # %(title)s template wrote in.
+                    track_title = ''
+                    if i < len(tracks):
+                        track_title = (tracks[i].get('title') or '').strip()
+                    if not track_title:
+                        raw_stem = audio_file.stem
+                        track_title = (
+                            raw_stem.split(' - ', 1)[1]
+                            if ' - ' in raw_stem else raw_stem
+                        )
                     try:
                         ok = await create_cover_audio_video(
                             audio_files=[str(audio_file)],
