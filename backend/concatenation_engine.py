@@ -165,6 +165,30 @@ def _metadata_args(album_meta: Optional[Dict]) -> List[str]:
     return args
 
 
+def _matroska_attachment_args(cover_path: str) -> List[str]:
+    """ffmpeg args to attach the cover as a Matroska 'cover.jpg' attachment.
+
+    AIMP, MusicBee, foobar2000 and other music players display the cover by
+    looking up an attachment whose filename starts with 'cover'. The cover
+    video stream alone is not recognised as album art."""
+    if not cover_path or not os.path.exists(cover_path):
+        return []
+    ext = os.path.splitext(cover_path)[1].lower()
+    if ext == '.png':
+        mime, name = 'image/png', 'cover.png'
+    elif ext in ('.jpg', '.jpeg'):
+        mime, name = 'image/jpeg', 'cover.jpg'
+    else:
+        # WebP/GIF/etc — Matroska players reliably handle only jpeg/png, but
+        # ffmpeg will still mux it; let the player decide.
+        mime, name = f'image/{ext.lstrip(".") or "jpeg"}', f'cover{ext or ".jpg"}'
+    return [
+        '-attach', cover_path,
+        '-metadata:s:t', f'mimetype={mime}',
+        '-metadata:s:t', f'filename={name}',
+    ]
+
+
 async def create_cover_audio_video(
     audio_files: List[str],
     cover_path: str,
@@ -277,6 +301,7 @@ async def create_cover_audio_video(
                     '-map', '0:v:0',
                     '-map', '1:a:0',
                     '-shortest',
+                    *_matroska_attachment_args(processed_cover),
                     *meta_args,
                     '-y',
                     output_path,

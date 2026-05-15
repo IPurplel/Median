@@ -13,6 +13,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps |
 | 🎬 **Video** | MP4, MKV, WebM |
 | 🖼️ **Cover + Audio** | Album art merged into a video file |
+| 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every file (ID3 / Vorbis / MP4) |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers |
 | 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16 · adjustable resolution |
 | 📋 **History** | Every download logged with size and format |
@@ -213,6 +214,7 @@ The frontend is served directly by FastAPI — no build step needed.
 - [FastAPI](https://fastapi.tiangolo.com/) — web framework
 - [APScheduler](https://apscheduler.readthedocs.io/) — background jobs
 - [Pillow](https://python-pillow.org/) — cover image processing
+- [mutagen](https://mutagen.readthedocs.io/) — audio metadata tags
 
 ---
 

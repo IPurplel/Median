@@ -181,6 +181,15 @@ async def download_single(
             add_chapters=False,
         )
 
+        # MP4 carries cover-as-video-stream, but AIMP/MusicBee/iTunes look at
+        # the covr atom for album art. Embed it explicitly while cover_file
+        # still exists on disk.
+        if (ok and video_output.exists() and video_output.suffix.lower() == '.mp4'
+                and cover_file and os.path.exists(cover_file)):
+            write_tags(str(video_output),
+                       **_album_meta(metadata, title, artist),
+                       cover_path=cover_file)
+
         # Don't delete an uploaded cover — it may be re-used; only delete yt-dlp
         # temp files and URL-fetched fallback covers (which have the temp_template stem).
         cover_is_uploaded = cover_id and cover_file and str(CUSTOM_COVER_DIR) in cover_file
@@ -375,6 +384,12 @@ async def download_playlist(
             # in the ffmpeg merge above).
             if download_type == 'audio' and output_path.exists():
                 write_tags(str(output_path), **_album_meta(metadata, album, artist, album=album))
+            # Cover+audio MP4: embed covr atom so AIMP shows album art.
+            if (download_type == 'cover_audio' and output_path.suffix.lower() == '.mp4'
+                    and output_path.exists() and cover_file and os.path.exists(cover_file)):
+                write_tags(str(output_path),
+                           **_album_meta(metadata, album, artist, album=album),
+                           cover_path=cover_file)
 
             file_size = os.path.getsize(str(output_path)) if output_path.exists() else 0
 
@@ -471,6 +486,11 @@ async def download_playlist(
                             add_chapters=False,
                         )
                         if ok:
+                            # Embed covr atom for MP4 outputs so AIMP shows album art
+                            if video_out.suffix.lower() == '.mp4' and video_out.exists():
+                                write_tags(str(video_out),
+                                           **_album_meta(metadata, track_title, artist, album=album),
+                                           cover_path=cover_path)
                             audio_file.unlink()
                     except Exception as e:
                         app_logger.error(f"cover_audio merge failed for {audio_file.name}: {e}")

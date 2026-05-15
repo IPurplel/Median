@@ -84,15 +84,25 @@ def _write_mp3(file_path: str, f: dict, cover_path: Optional[str]):
         tags['TYER'] = TYER(encoding=3, text=f['year'])
 
     if cover_path and Path(cover_path).is_file():
-        # Strip any existing covers and replace with ours
+        # Strip any existing covers and write a fresh one
         tags.delall('APIC')
-        tags['APIC'] = APIC(
-            encoding=3,
-            mime=_cover_mime(cover_path),
-            type=3,  # front cover
-            desc='Cover',
-            data=Path(cover_path).read_bytes(),
-        )
+        tags.add(APIC(
+            encoding=0, mime=_cover_mime(cover_path),
+            type=3, desc='', data=Path(cover_path).read_bytes(),
+        ))
+    else:
+        # No new cover supplied, but yt-dlp's EmbedThumbnail wrote one with
+        # desc='Album cover'. AIMP (and some other strict players) treat any
+        # non-empty desc as a *supplementary* image rather than the album's
+        # primary cover, so it silently skips displaying it. Rewrite the
+        # existing frame with desc='' so AIMP picks it up.
+        apics = tags.getall('APIC')
+        if apics:
+            front = next((a for a in apics if a.type == 3), apics[0])
+            data = front.data
+            mime = front.mime or 'image/jpeg'
+            tags.delall('APIC')
+            tags.add(APIC(encoding=0, mime=mime, type=3, desc='', data=data))
 
     # v2_version=3 → write ID3v2.3 for broadest player compat (AIMP, MusicBee, etc.)
     tags.save(file_path, v2_version=3)
