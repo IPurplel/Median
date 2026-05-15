@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from typing import Optional, Dict, Any
 from backend.utils.cache_manager import metadata_cache
 from backend.utils.validators import detect_platform, is_playlist_url
@@ -144,6 +145,49 @@ async def _do_extract(url: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+# Trailing "(Official Music Video)", "[Lyric Video]", "(Audio)", "(HD)" etc.
+_TITLE_NOISE_RE = re.compile(
+    r'\s*[\(\[][^\)\]]*\b(?:official|lyric[s]?|music\s+video|audio|visualizer|hd|4k|uhd)\b[^\)\]]*[\)\]]\s*$',
+    re.IGNORECASE,
+)
+
+
+def _extract_title(info: dict) -> str:
+    """Clean song title — prefer yt-dlp's parsed 'track' over the video title.
+
+    YouTube video titles typically embed the artist as a prefix
+    ('Drake - One Dance (Official Music Video)'). When yt-dlp populates
+    'track' (YouTube Music / Bandcamp metadata), it is already the clean
+    song name — use it. Otherwise strip a leading '{artist} - ' prefix and
+    trailing noise tags so the title column in music players reads cleanly."""
+    track = (info.get('track') or '').strip()
+    if track:
+        return track
+
+    title = (info.get('title') or '').strip()
+    if not title:
+        return 'Unknown'
+
+    artist = (
+        info.get('artist') or info.get('uploader') or info.get('channel') or ''
+    ).strip()
+    if artist:
+        for sep in (' - ', ' – ', ' — ', ' | '):
+            prefix = f"{artist}{sep}"
+            if title.lower().startswith(prefix.lower()):
+                title = title[len(prefix):].strip()
+                break
+
+    # Strip up to two trailing noise tags (e.g. "(Official Video) (HD)").
+    for _ in range(2):
+        new = _TITLE_NOISE_RE.sub('', title).strip()
+        if new == title:
+            break
+        title = new
+
+    return title or 'Unknown'
+
+
 def _extract_year(info: dict) -> str:
     """Best-effort 'YYYY' from release_date / release_year / upload_date."""
     rd = info.get('release_date') or ''
@@ -196,7 +240,7 @@ def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url
             continue
         tracks.append({
             'index': i + 1,
-            'title': entry.get('title') or f'Track {i+1}',
+            'title': _extract_title(entry) or f'Track {i+1}',
             'artist': (
                 entry.get('artist') or entry.get('uploader') or
                 entry.get('channel') or ''
@@ -261,7 +305,7 @@ def _parse_metadata_single(info: dict, url: str) -> dict:
     return {
         'is_playlist': False,
         'platform': detect_platform(url),
-        'title': info.get('title') or 'Unknown',
+        'title': _extract_title(info),
         'artist': (
             info.get('artist') or
             info.get('album_artist') or
