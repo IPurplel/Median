@@ -111,12 +111,10 @@ async def process_cover_image(
     COVER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # No-op fast path: original ratio AND original resolution means
-    # "use the source as-is", so nothing to render.
+    # "use the source as-is", so nothing to render. A fixed ratio with
+    # resolution='original' still needs processing — the ratio crop/pad
+    # is applied at the source's native size in _process_image_sync.
     if resolution == 'original' and ratio == 'original':
-        return image_path
-    # Original resolution alone still keeps the source untouched — ratio
-    # selection has no meaning without a target size to crop/pad into.
-    if resolution == 'original':
         return image_path
 
     cache_key = get_cache_key(image_path, ratio, resolution)
@@ -175,12 +173,20 @@ def _process_image_sync(
             return output_path
 
         orig_ratio = orig_w / orig_h
-
-        target_w, target_h = get_target_dimensions(ratio, resolution)
-        if target_w is None:
-            return image_path
-
         r_w, r_h = parse_ratio(ratio)
+
+        if resolution == 'original':
+            # Largest crop matching the requested ratio that fits inside
+            # the source — never upscales beyond the source's dimensions.
+            target_w = min(orig_w, int(orig_h * r_w / r_h))
+            target_h = min(orig_h, int(orig_w * r_h / r_w))
+            target_w = max(2, target_w - (target_w % 2))
+            target_h = max(2, target_h - (target_h % 2))
+        else:
+            target_w, target_h = get_target_dimensions(ratio, resolution)
+            if target_w is None:
+                return image_path
+
         target_ratio = r_w / r_h
 
         ratio_diff = abs(orig_ratio - target_ratio) / target_ratio
