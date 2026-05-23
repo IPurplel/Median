@@ -153,16 +153,14 @@ def _process_image_sync(
         img = img.convert('RGB')
 
         if ratio == 'original':
-            # Keep the source aspect ratio; cap the longest side at the
-            # resolution's longer dim so the cover fits the target frame
-            # without cropping or padding.
-            base = RESOLUTION_MAP.get(resolution, (1280, 720))
-            max_dim = max(base)
-            longest = max(orig_w, orig_h)
-            if longest <= max_dim:
-                # Source already fits — return it untouched.
+            # Keep the source aspect ratio; scale to fit inside the
+            # resolution's box on BOTH axes so a square source at "720p"
+            # becomes 720x720 (not 1280x1280). Never upscale.
+            base_w, base_h = RESOLUTION_MAP.get(resolution, (1280, 720))
+            scale = min(base_w / orig_w, base_h / orig_h, 1.0)
+            if scale >= 1.0:
+                # Source already fits the box — return it untouched.
                 return image_path
-            scale = max_dim / longest
             new_w = max(2, int(orig_w * scale))
             new_h = max(2, int(orig_h * scale))
             new_w = new_w - (new_w % 2)
