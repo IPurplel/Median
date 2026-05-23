@@ -153,21 +153,32 @@ def _process_image_sync(
         img = img.convert('RGB')
 
         if ratio == 'original':
-            # Keep the source aspect ratio; scale to fit inside the
-            # resolution's box on BOTH axes so a square source at "720p"
-            # becomes 720x720 (not 1280x1280). Never upscale.
+            # Source aspect is preserved. Pick output dims so the chosen
+            # resolution is always honored:
+            #  - source larger than the box on any axis -> downscale to fit
+            #    (no padding; output may be smaller than the box).
+            #  - source smaller-or-equal on both axes -> upscale to fit and
+            #    fill any aspect gap with blurry padding, so output matches
+            #    the requested resolution exactly. Same blurry-pixel
+            #    behavior as the fixed-ratio paths.
             base_w, base_h = RESOLUTION_MAP.get(resolution, (1280, 720))
-            scale = min(base_w / orig_w, base_h / orig_h, 1.0)
-            if scale >= 1.0:
-                # Source already fits the box — return it untouched.
+            base_w = max(2, base_w - (base_w % 2))
+            base_h = max(2, base_h - (base_h % 2))
+            fit_scale = min(base_w / orig_w, base_h / orig_h)
+            if fit_scale < 1.0:
+                new_w = max(2, int(orig_w * fit_scale))
+                new_h = max(2, int(orig_h * fit_scale))
+                new_w -= new_w % 2
+                new_h -= new_h % 2
+                result = img.resize((new_w, new_h), Image.LANCZOS)
+            elif orig_w == base_w and orig_h == base_h:
                 return image_path
-            new_w = max(2, int(orig_w * scale))
-            new_h = max(2, int(orig_h * scale))
-            new_w = new_w - (new_w % 2)
-            new_h = new_h - (new_h % 2)
-            result = img.resize((new_w, new_h), Image.LANCZOS)
+            elif settings.BLURRY_PADDING_ENABLED:
+                result = _apply_blurry_padding(img, base_w, base_h)
+            else:
+                return image_path
             result.save(output_path, 'JPEG', quality=92, optimize=True)
-            app_logger.debug(f"Cover processed (original ratio): {output_path} ({new_w}x{new_h})")
+            app_logger.debug(f"Cover processed (original ratio): {output_path}")
             return output_path
 
         orig_ratio = orig_w / orig_h
