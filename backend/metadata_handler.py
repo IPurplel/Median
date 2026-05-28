@@ -325,6 +325,8 @@ def _parse_metadata_single(info: dict, url: str) -> dict:
 
 
 def _best_thumbnail(info: dict) -> str:
+    from backend.image_processor import upgrade_thumbnail_url
+
     thumbs = info.get('thumbnails')
     if thumbs and isinstance(thumbs, list):
         https_thumbs = [
@@ -337,9 +339,9 @@ def _best_thumbnail(info: dict) -> str:
                 key=lambda t: (t.get('preference') or t.get('quality') or 0,
                                t.get('width') or 0)
             )
-            return best.get('url') or ''
+            return upgrade_thumbnail_url(best.get('url') or '')
 
-    return info.get('thumbnail') or ''
+    return upgrade_thumbnail_url(info.get('thumbnail') or '')
 
 
 def _get_available_formats(info: dict) -> list:

@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import asyncio
 from pathlib import Path
@@ -23,6 +24,19 @@ RATIO_MAP = {
 }
 
 COVER_CACHE_DIR = Path(settings.UPLOAD_FOLDER) / ".cover_cache"
+
+# Bandcamp art: https://f4.bcbits.com/img/a{ID}_{size}.jpg
+# Size codes downscale the source; _0 is the artist's full original upload.
+_BCBITS_ART_RE = re.compile(r"(https?://f4\.bcbits\.com/img/a\d+)_\d+(\.\w+)$")
+
+
+def upgrade_thumbnail_url(url: str) -> str:
+    if not url:
+        return url
+    m = _BCBITS_ART_RE.match(url)
+    if m:
+        return f"{m.group(1)}_0{m.group(2)}"
+    return url
 
 
 def parse_ratio(ratio_str: str) -> Tuple[int, int]:
@@ -258,6 +272,8 @@ def _center_crop(img, target_w: int, target_h: int):
 
 async def download_cover_image(url: str, dest_path: str) -> Optional[str]:
     import aiohttp
+
+    url = upgrade_thumbnail_url(url)
 
     try:
         async with aiohttp.ClientSession() as session:
