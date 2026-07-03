@@ -47,7 +47,13 @@ class Settings(BaseSettings):
 
     CONCAT_AUDIO_TIMEOUT: int = 300
     CONCAT_VIDEO_TIMEOUT: int = 600
-    COVER_MERGE_TIMEOUT: int = 300
+    COVER_MERGE_TIMEOUT: int = 1800
+
+    # Cover+Audio renders a video from a single static image. A high frame rate
+    # just multiplies identical frames — at 25fps a 60-min album is ~90k frames,
+    # which overruns the merge timeout. 1fps is plenty for a still cover (album
+    # art shows via the covr atom / sidecar cover.jpg, not the video stream).
+    COVER_VIDEO_FPS: float = 1.0
 
     ALLOWED_THUMBNAIL_HOSTS: set = {
         "i.ytimg.com", "i9.ytimg.com",
