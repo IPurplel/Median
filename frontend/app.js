@@ -8,6 +8,7 @@ let currentDownloadType = 'audio';
 let currentFormat = 'mp3';
 let currentBitrate = '320';
 let currentCoverSettings = { ratio: '1:1', resolution: 'original', output_format: 'mp4' };
+let currentCrossfade = { enabled: false, duration: 2.0 };
 let customCoverId = null;
 let activePollers = {};  // download_id -> setInterval id (polling fallback)
 let activeSSE = {};     // download_id -> EventSource
@@ -215,9 +216,11 @@ function renderMeta(meta) {
     }
     if (totalDurStr) sub += ` · ${totalDurStr}`;
     $('#concat-option').classList.remove('hidden');
+    syncCrossfadeUI();
   } else {
     if (meta.duration_display) sub = meta.duration_display;
     $('#concat-option').classList.add('hidden');
+    $('#crossfade-option').classList.add('hidden');
   }
   $('#meta-sub').textContent = sub;
 
@@ -251,8 +254,43 @@ function renderMeta(meta) {
   const concatToggle = $('#concat-toggle');
   if (!meta.is_playlist && concatToggle) {
     concatToggle.checked = false;
+    const xfToggle = $('#crossfade-toggle');
+    if (xfToggle) xfToggle.checked = false;
+    currentCrossfade.enabled = false;
+    $('#crossfade-duration-row')?.classList.add('hidden');
   }
 }
+
+// ── CROSSFADE OPTION ──────────────────────────────────────────────────────────
+// Crossfade is only meaningful when "Merge into single file" is on, so its toggle
+// is revealed by the merge toggle, and the duration slider by the crossfade toggle.
+function syncCrossfadeUI() {
+  const concatOn = $('#concat-toggle')?.checked;
+  const xfOpt = $('#crossfade-option');
+  const xfToggle = $('#crossfade-toggle');
+  const xfRow = $('#crossfade-duration-row');
+  if (!xfOpt) return;
+  if (concatOn) {
+    xfOpt.classList.remove('hidden');
+  } else {
+    xfOpt.classList.add('hidden');
+    if (xfToggle) xfToggle.checked = false;
+    currentCrossfade.enabled = false;
+  }
+  if (xfRow) xfRow.classList.toggle('hidden', !(xfToggle && xfToggle.checked));
+}
+
+$('#concat-toggle')?.addEventListener('change', syncCrossfadeUI);
+$('#crossfade-toggle')?.addEventListener('change', (e) => {
+  currentCrossfade.enabled = e.target.checked;
+  syncCrossfadeUI();
+});
+$('#crossfade-duration')?.addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value);
+  currentCrossfade.duration = v;
+  const lbl = $('#crossfade-duration-value');
+  if (lbl) lbl.textContent = v.toFixed(1) + 's';
+});
 
 // ── DOWNLOAD TYPE TABS ────────────────────────────────────────────────────────
 $$('#download-options .type-tab').forEach(btn => {
@@ -452,6 +490,9 @@ async function startDownload() {
       format: fmt,
       bitrate: currentBitrate,
       concatenate,
+      // Crossfade only applies when merging into a single file.
+      crossfade: concatenate && currentCrossfade.enabled,
+      crossfade_duration: currentCrossfade.duration,
       cover_settings: currentDownloadType === 'cover_audio' ? currentCoverSettings : null,
       cover_id: currentDownloadType === 'cover_audio' ? customCoverId : null,
     };

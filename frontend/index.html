@@ -165,6 +165,24 @@
             </label>
           </div>
 
+          <!-- CROSSFADE OPTION (playlists, only when merging) -->
+          <div class="concat-option hidden" id="crossfade-option">
+            <label class="toggle-label">
+              <input type="checkbox" id="crossfade-toggle" class="toggle-input">
+              <span class="toggle-track"></span>
+              <span class="toggle-text">
+                <strong>Crossfade tracks</strong>
+                <span>— blend adjacent tracks instead of hard cuts</span>
+              </span>
+            </label>
+            <div class="crossfade-duration-row hidden" id="crossfade-duration-row"
+                 style="display:flex;align-items:center;gap:10px;margin-top:10px;">
+              <label class="row-label" for="crossfade-duration" style="margin:0;">Crossfade length</label>
+              <input type="range" id="crossfade-duration" min="0.5" max="12" step="0.5" value="2" style="flex:1;">
+              <span class="crossfade-duration-value" id="crossfade-duration-value" style="min-width:42px;text-align:right;">2.0s</span>
+            </div>
+          </div>
+
           <!-- COVER SETTINGS (cover_audio type) -->
           <div class="cover-settings-panel hidden" id="cover-settings-panel">
 

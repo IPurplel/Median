@@ -49,6 +49,20 @@ class Settings(BaseSettings):
     CONCAT_VIDEO_TIMEOUT: int = 600
     COVER_MERGE_TIMEOUT: int = 300
 
+    # Crossfade ("Merge into single file" blend between adjacent tracks).
+    # Crossfade forces a re-encode (incompatible with the -c copy fast path),
+    # so the concat timeouts above apply to it too.
+    CROSSFADE_DURATION: float = 2.0          # default overlap seconds
+    CROSSFADE_MIN_DURATION: float = 0.5      # UI/clamp floor
+    CROSSFADE_MAX_DURATION: float = 12.0     # UI/clamp ceiling
+    CROSSFADE_CURVE: str = "qsin"            # constant-power crossfade curve
+    CROSSFADE_VIDEO_TRANSITION: str = "fade"  # xfade transition (smooth dissolve)
+    CROSSFADE_VIDEO_FPS: int = 30            # common fps for xfade inputs
+    CROSSFADE_FALLBACK_WIDTH: int = 1920     # canvas when clip resolutions differ
+    CROSSFADE_FALLBACK_HEIGHT: int = 1080
+    CROSSFADE_NORMALIZE_SAMPLE_RATE: int = 44100
+    CROSSFADE_MAX_TRACKS: int = 50           # above this, fall back to hard-cut concat
+
     ALLOWED_THUMBNAIL_HOSTS: set = {
         "i.ytimg.com", "i9.ytimg.com",
         "i1.sndcdn.com", "i2.sndcdn.com",

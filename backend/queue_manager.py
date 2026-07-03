@@ -136,6 +136,8 @@ async def process_download(download_id: str, download_params: dict):
         concatenate = download_params.get('concatenate', False)
         cover_settings = download_params.get('cover_settings')
         cover_id = download_params.get('cover_id')
+        crossfade = download_params.get('crossfade', False)
+        crossfade_duration = download_params.get('crossfade_duration')
 
         download_states[download_id] = {
             'id': download_id,
@@ -186,6 +188,8 @@ async def process_download(download_id: str, download_params: dict):
                     progress_callback=progress_callback,
                     cover_settings=cover_settings,
                     cover_id=cover_id,
+                    crossfade=crossfade,
+                    crossfade_duration=crossfade_duration,
                 )
             else:
                 result = await download_single(

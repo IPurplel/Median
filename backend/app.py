@@ -159,6 +159,8 @@ class DownloadRequest(BaseModel):
     format: Literal["mp3", "flac", "aac", "mp4", "mkv", "webm"]
     bitrate: Optional[str] = ""
     concatenate: bool = False
+    crossfade: bool = False
+    crossfade_duration: float = settings.CROSSFADE_DURATION
     cover_settings: Optional[CoverSettings] = None
     cover_id: Optional[str] = None
 
@@ -167,6 +169,13 @@ class DownloadRequest(BaseModel):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
         return v
+
+    @validator("crossfade_duration")
+    def crossfade_duration_valid(cls, v):
+        # Clamp to the configured bounds rather than reject — the UI slider stays
+        # within range, but a stray value shouldn't fail the whole request.
+        lo, hi = settings.CROSSFADE_MIN_DURATION, settings.CROSSFADE_MAX_DURATION
+        return max(lo, min(hi, v))
 
     @validator("bitrate")
     def bitrate_valid(cls, v):
@@ -358,6 +367,8 @@ async def start_download(req: DownloadRequest, request: Request):
         'format': req.format,
         'bitrate': req.bitrate,
         'concatenate': req.concatenate,
+        'crossfade': req.crossfade,
+        'crossfade_duration': req.crossfade_duration,
         'metadata': meta,
         'cover_settings': cover_settings_dict,
         'cover_id': req.cover_id,
