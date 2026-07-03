@@ -246,6 +246,8 @@ async def download_playlist(
     progress_callback: Optional[Callable] = None,
     cover_settings: Optional[dict] = None,
     cover_id: Optional[str] = None,
+    crossfade: bool = False,
+    crossfade_duration: Optional[float] = None,
 ) -> Dict[str, Any]:
     import yt_dlp
 
@@ -336,12 +338,15 @@ async def download_playlist(
             if download_type == 'audio':
                 ok = await concatenate_audio(
                     downloaded_files, str(output_path), tracks,
-                    add_chapters=True, progress_callback=progress_callback
+                    add_chapters=True, progress_callback=progress_callback,
+                    crossfade=crossfade, crossfade_duration=crossfade_duration,
+                    bitrate=bitrate,
                 )
             elif download_type == 'video':
                 ok = await concatenate_video(
                     downloaded_files, str(output_path), fmt,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    crossfade=crossfade, crossfade_duration=crossfade_duration,
                 )
             elif download_type == 'cover_audio':
                 cover_file = None
@@ -370,7 +375,9 @@ async def download_playlist(
                     cover_ratio=cover_settings.get('ratio', '1:1') if cover_settings else '1:1',
                     cover_resolution=cover_settings.get('resolution', 'original') if cover_settings else 'original',
                     add_chapters=True,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    crossfade=crossfade,
+                    crossfade_duration=crossfade_duration,
                 )
             else:
                 ok = False

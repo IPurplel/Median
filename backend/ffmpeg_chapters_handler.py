@@ -15,15 +15,32 @@ def _escape_meta_value(s: str) -> str:
 
 def generate_ffmpeg_metadata(
     tracks: List[Dict],
-    output_path: str
+    output_path: str,
+    overlap_seconds: float = 0.0,
 ) -> str:
-    lines = [";FFMETADATA1\n"]
+    """Build an FFMETADATA chapter file.
 
+    When tracks are crossfaded the timeline is pulled left by ``overlap_seconds``
+    at every join, so each track (after the first) starts that much earlier than
+    a naive cumulative sum. Chapter i spans [start_i, start_{i+1}); the final
+    chapter runs to the true end of the (shortened) timeline.
+    """
+    overlap_ms = max(0, int(overlap_seconds * 1000))
+
+    # Compute each track's start position on the (possibly crossfaded) timeline.
+    starts: List[int] = []
     cursor = 0
     for i, track in enumerate(tracks):
         duration_ms = int((track.get('duration') or 0) * 1000)
-        start_ms = cursor
-        end_ms = cursor + duration_ms
+        start_ms = 0 if i == 0 else max(0, cursor - overlap_ms)
+        starts.append(start_ms)
+        cursor = start_ms + duration_ms
+    total_ms = cursor
+
+    lines = [";FFMETADATA1\n"]
+    for i, track in enumerate(tracks):
+        start_ms = starts[i]
+        end_ms = starts[i + 1] if i + 1 < len(starts) else total_ms
 
         title = track.get('title', f'Track {i+1}')
         artist = track.get('artist', '')
@@ -35,8 +52,6 @@ def generate_ffmpeg_metadata(
         lines.append(f"title={_escape_meta_value(title)}")
         if artist:
             lines.append(f"artist={_escape_meta_value(artist)}")
-
-        cursor = end_ms
 
     meta_content = "\n".join(lines)
 
@@ -70,7 +85,8 @@ def embed_chapters(
 
 def add_chapters_to_file(
     file_path: str,
-    tracks: List[Dict]
+    tracks: List[Dict],
+    overlap_seconds: float = 0.0,
 ) -> bool:
     if not tracks:
         return True
@@ -87,7 +103,7 @@ def add_chapters_to_file(
     replaced = False
 
     try:
-        meta_file = generate_ffmpeg_metadata(verified_tracks, file_path)
+        meta_file = generate_ffmpeg_metadata(verified_tracks, file_path, overlap_seconds)
         temp_output = file_path + ".chapters_temp" + Path(file_path).suffix
 
         if embed_chapters(file_path, meta_file, temp_output) and os.path.exists(temp_output):

@@ -62,3 +62,23 @@ def validate_media_file(file_path: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def get_video_dimensions(file_path: str) -> Optional[tuple]:
+    """Return (width, height) of the first video stream, or None if unavailable."""
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    cmd = [
+        ffprobe, "-v", "quiet",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        file_path
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            w, _, h = result.stdout.strip().partition('x')
+            return int(w), int(h)
+    except Exception:
+        pass
+    return None
