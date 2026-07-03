@@ -516,8 +516,17 @@ async def create_cover_audio_video(
         def _merge():
             out_ext = Path(output_path).suffix.lower().lstrip('.')
 
-            args = [
-                '-loop', '1',
+            # Bound the looped still image to the audio length. At a low frame
+            # rate -shortest lets the video encoder run ahead and overshoot the
+            # audio (e.g. 1fps produced a 174s video for 120s of audio), so cap
+            # the image input duration explicitly; -shortest stays as a fallback
+            # when the duration can't be probed.
+            audio_dur = get_media_duration(audio_for_merge)
+
+            args = ['-loop', '1', '-framerate', str(settings.COVER_VIDEO_FPS)]
+            if audio_dur:
+                args += ['-t', f'{audio_dur:.3f}']
+            args += [
                 '-i', processed_cover,
                 '-i', audio_for_merge,
             ]
