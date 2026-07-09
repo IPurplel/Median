@@ -8,7 +8,7 @@ from backend.config import settings
 from backend.utils.validators import detect_platform, is_playlist_url
 from backend.utils.file_organizer import (
     get_single_track_filename, get_album_filename,
-    get_playlist_folder, get_track_in_album_filename,
+    get_playlist_folder,
     ensure_unique_path, find_downloaded_file
 )
 from backend.concatenation_engine import (
@@ -32,6 +32,51 @@ def _album_meta(metadata: dict, title: str, artist: str, album: str = '') -> dic
 
 
 CUSTOM_COVER_DIR = settings.custom_cover_path
+
+
+async def _resolve_cover_file(
+    cover_id: Optional[str],
+    local_candidates: list,
+    thumbnail_url: str,
+    fallback_path: str,
+    require_uploaded: bool = False,
+) -> Optional[str]:
+    """Resolve the cover image for a cover+audio merge.
+
+    Priority: user-uploaded cover (by cover_id) → local candidate files
+    (yt-dlp-downloaded thumbnails) → download from the metadata thumbnail URL.
+    """
+    if cover_id:
+        matches = list(CUSTOM_COVER_DIR.glob(f"{cover_id}.*"))
+        if matches:
+            app_logger.info(f"Using uploaded cover: {matches[0]}")
+            return str(matches[0])
+        if require_uploaded:
+            raise RuntimeError(
+                f"Uploaded cover image not found (id={cover_id}). Re-upload and try again."
+            )
+
+    for candidate in local_candidates:
+        if candidate and os.path.exists(candidate) and os.path.getsize(candidate) > 0:
+            app_logger.info(f"Cover found: {candidate}")
+            return str(candidate)
+
+    if thumbnail_url:
+        app_logger.info("Downloading cover from metadata thumbnail URL...")
+        result = await download_cover_image(thumbnail_url, fallback_path)
+        if result and os.path.exists(result):
+            app_logger.info(f"Cover downloaded from URL: {result}")
+            return result
+
+    return None
+
+
+def _embed_mp4_cover(output_path: Path, cover_file: Optional[str], album_meta: dict):
+    """MP4 carries cover-as-video-stream, but AIMP/MusicBee/iTunes look at the
+    covr atom for album art — embed it explicitly while the cover still exists."""
+    if (output_path.suffix.lower() == '.mp4' and output_path.exists()
+            and cover_file and os.path.exists(cover_file)):
+        write_tags(str(output_path), **album_meta, cover_path=cover_file)
 
 async def download_single(
     url: str,
@@ -104,41 +149,24 @@ async def download_single(
         raise FileNotFoundError(f"Download failed: no output file found for {url}")
 
     if download_type == 'cover_audio':
-        cover_file = None
         parent_dir = Path(temp_template).parent
         stem = Path(temp_template).name
 
-        if cover_id:
-            matches = list(CUSTOM_COVER_DIR.glob(f"{cover_id}.*"))
-            if not matches:
-                raise RuntimeError(f"Uploaded cover image not found (id={cover_id}). Re-upload and try again.")
-            cover_file = str(matches[0])
-            app_logger.info(f"Using uploaded cover: {cover_file}")
+        local_candidates = [
+            find_downloaded_file(temp_template, img_ext)
+            for img_ext in ('jpg', 'jpeg', 'png', 'webp')
+        ]
+        if parent_dir.exists():
+            local_candidates += [
+                str(f) for f in sorted(parent_dir.iterdir())
+                if f.stem.startswith(stem)
+                and f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp')
+            ]
 
-        for img_ext in ('jpg', 'jpeg', 'png', 'webp'):
-            if cover_file:
-                break
-            candidate = find_downloaded_file(temp_template, img_ext)
-            if candidate and os.path.exists(candidate):
-                cover_file = candidate
-                app_logger.info(f"Cover found (direct): {candidate}")
-                break
-
-        if not cover_file and parent_dir.exists():
-            for f in sorted(parent_dir.iterdir()):
-                if (f.stem.startswith(stem) and
-                        f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp') and
-                        f.stat().st_size > 0):
-                    cover_file = str(f)
-                    app_logger.info(f"Cover found (scan): {cover_file}")
-                    break
-
-        if not cover_file and metadata.get('thumbnail'):
-            fallback_cover = temp_template + '_cover.jpg'
-            app_logger.info(f"Downloading cover from metadata thumbnail URL...")
-            cover_file = await download_cover_image(metadata['thumbnail'], fallback_cover)
-            if cover_file:
-                app_logger.info(f"Cover downloaded from URL: {cover_file}")
+        cover_file = await _resolve_cover_file(
+            cover_id, local_candidates, metadata.get('thumbnail', ''),
+            temp_template + '_cover.jpg', require_uploaded=True,
+        )
 
         if not cover_file or not os.path.exists(cover_file):
             app_logger.error(
@@ -181,14 +209,8 @@ async def download_single(
             add_chapters=False,
         )
 
-        # MP4 carries cover-as-video-stream, but AIMP/MusicBee/iTunes look at
-        # the covr atom for album art. Embed it explicitly while cover_file
-        # still exists on disk.
-        if (ok and video_output.exists() and video_output.suffix.lower() == '.mp4'
-                and cover_file and os.path.exists(cover_file)):
-            write_tags(str(video_output),
-                       **_album_meta(metadata, title, artist),
-                       cover_path=cover_file)
+        if ok:
+            _embed_mp4_cover(video_output, cover_file, _album_meta(metadata, title, artist))
 
         # Don't delete an uploaded cover — it may be re-used; only delete yt-dlp
         # temp files and URL-fetched fallback covers (which have the temp_template stem).
@@ -308,13 +330,14 @@ async def download_playlist(
                 f = find_downloaded_file(temp_template, dl_ext)
                 if f:
                     downloaded_files.append(f)
-                else:
-                    track_title = track.get('title', f'track {i+1}')
-                    app_logger.warning(f"Track {i+1} ({track_title!r}) failed to download — skipping")
                     if not track.get('duration'):
                         from backend.utils.ffmpeg_handler import get_media_duration
                         dur = get_media_duration(f)
                         tracks[i]['duration'] = dur or 0
+                else:
+                    track_title = track.get('title', f'track {i+1}')
+                    app_logger.warning(f"Track {i+1} ({track_title!r}) failed to download — skipping")
+                    tracks[i]['duration'] = track.get('duration') or 0
 
                 if download_type == 'cover_audio':
                     for img_ext in ('jpg', 'png', 'webp'):
@@ -349,22 +372,10 @@ async def download_playlist(
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
                 )
             elif download_type == 'cover_audio':
-                cover_file = None
-                if cover_id:
-                    matches = list(CUSTOM_COVER_DIR.glob(f"{cover_id}.*"))
-                    if matches:
-                        cover_file = str(matches[0])
-                if not cover_file:
-                    cover_file = downloaded_covers[0] if downloaded_covers else None
-                if not cover_file:
-                    cover_url = metadata.get('thumbnail', '')
-                    if cover_url:
-                        fallback_path = str(temp_dir / 'album_cover.jpg')
-                        result_path = await download_cover_image(cover_url, fallback_path)
-                        if result_path and os.path.exists(result_path):
-                            cover_file = result_path
-                        else:
-                            cover_file = None
+                cover_file = await _resolve_cover_file(
+                    cover_id, downloaded_covers, metadata.get('thumbnail', ''),
+                    str(temp_dir / 'album_cover.jpg'),
+                )
 
                 ok = await create_cover_audio_video(
                     downloaded_files,
@@ -391,12 +402,9 @@ async def download_playlist(
             # in the ffmpeg merge above).
             if download_type == 'audio' and output_path.exists():
                 write_tags(str(output_path), **_album_meta(metadata, album, artist, album=album))
-            # Cover+audio MP4: embed covr atom so AIMP shows album art.
-            if (download_type == 'cover_audio' and output_path.suffix.lower() == '.mp4'
-                    and output_path.exists() and cover_file and os.path.exists(cover_file)):
-                write_tags(str(output_path),
-                           **_album_meta(metadata, album, artist, album=album),
-                           cover_path=cover_file)
+            if download_type == 'cover_audio':
+                _embed_mp4_cover(output_path, cover_file,
+                                 _album_meta(metadata, album, artist, album=album))
 
             file_size = os.path.getsize(str(output_path)) if output_path.exists() else 0
 
@@ -458,21 +466,12 @@ async def download_playlist(
                 if f.is_file() and f.suffix.lower() in AUDIO_EXTS
             )
 
-            cover_path = None
-            if cover_id:
-                matches = list(CUSTOM_COVER_DIR.glob(f"{cover_id}.*"))
-                if matches:
-                    cover_path = str(matches[0])
-            if not cover_path:
-                for img_file in album_folder.iterdir():
-                    if img_file.suffix.lower() in IMAGE_EXTS and img_file.stat().st_size > 0:
-                        cover_path = str(img_file)
-                        break
-            if not cover_path and metadata.get('thumbnail'):
-                downloaded_cover = str(album_folder / '_album_cover.jpg')
-                result = await download_cover_image(metadata['thumbnail'], downloaded_cover)
-                if result and os.path.exists(result):
-                    cover_path = result
+            cover_path = await _resolve_cover_file(
+                cover_id,
+                [str(f) for f in album_folder.iterdir() if f.suffix.lower() in IMAGE_EXTS],
+                metadata.get('thumbnail', ''),
+                str(album_folder / '_album_cover.jpg'),
+            )
 
             if cover_path:
                 for i, audio_file in enumerate(audio_files):
@@ -503,11 +502,8 @@ async def download_playlist(
                             add_chapters=False,
                         )
                         if ok:
-                            # Embed covr atom for MP4 outputs so AIMP shows album art
-                            if video_out.suffix.lower() == '.mp4' and video_out.exists():
-                                write_tags(str(video_out),
-                                           **_album_meta(metadata, track_title, artist, album=album),
-                                           cover_path=cover_path)
+                            _embed_mp4_cover(video_out, cover_path,
+                                             _album_meta(metadata, track_title, artist, album=album))
                             audio_file.unlink()
                     except Exception as e:
                         app_logger.error(f"cover_audio merge failed for {audio_file.name}: {e}")

@@ -45,7 +45,6 @@ def init_db():
             playlist_count INTEGER,
             is_concatenated INTEGER DEFAULT 0,
             cover_settings TEXT,
-            chapter_data TEXT,
             keep_file INTEGER DEFAULT 0,
             queue_position INTEGER,
             source TEXT DEFAULT 'manual'
@@ -116,6 +115,11 @@ def init_db():
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")
+
+    # Migration: drop unused chapter_data column (chapters are embedded in the
+    # media file itself, never stored in the DB)
+    if 'chapter_data' in cols:
+        db.execute("ALTER TABLE downloads DROP COLUMN chapter_data")
 
     # Mark any downloads stuck in 'downloading' or 'queued' from a previous run as errored
     db.execute("""

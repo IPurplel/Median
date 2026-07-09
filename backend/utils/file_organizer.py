@@ -29,13 +29,6 @@ def get_playlist_folder(artist: str, album: str) -> str:
     return f"{artist} - {album}"
 
 
-def get_track_in_album_filename(title: str, ext: str, index: int = None) -> str:
-    title = sanitize_filename(title or "Unknown")
-    if index is not None:
-        return f"{index:02d} - {title}.{ext}"
-    return f"{title}.{ext}"
-
-
 def ensure_unique_path(base_path: Path) -> Path:
     if not base_path.exists():
         return base_path

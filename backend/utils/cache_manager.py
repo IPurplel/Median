@@ -1,3 +1,4 @@
+import calendar
 import json
 import time
 from typing import Optional
@@ -20,7 +21,8 @@ class MetadataCache:
             if row:
                 cached_str = row['cached_at'].split('.')[0]
                 try:
-                    ts = time.mktime(time.strptime(cached_str, '%Y-%m-%d %H:%M:%S'))
+                    # cached_at is stored as UTC (datetime('now')) — parse as UTC
+                    ts = calendar.timegm(time.strptime(cached_str, '%Y-%m-%d %H:%M:%S'))
                 except ValueError:
                     # Unparseable timestamp — treat as expired so it gets refreshed
                     db.execute("DELETE FROM metadata_cache WHERE url = ?", (url,))
@@ -50,16 +52,6 @@ class MetadataCache:
             db.commit()
         except Exception as e:
             app_logger.error(f"Cache set error: {e}")
-        finally:
-            db.close()
-
-    def invalidate(self, url: str):
-        db = get_db()
-        try:
-            db.execute("DELETE FROM metadata_cache WHERE url = ?", (url,))
-            db.commit()
-        except Exception as e:
-            app_logger.error(f"Cache invalidate error: {e}")
         finally:
             db.close()
 

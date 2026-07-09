@@ -53,6 +53,11 @@ _RL_WINDOW = 60
 
 def _rate_check(ip: str, limit: int = _RL_LIMIT, window: int = _RL_WINDOW) -> bool:
     now = time.time()
+    # Evict IPs with no recent activity so the store doesn't grow unboundedly
+    if len(_rl_store) > 1000:
+        stale = [k for k, ts in _rl_store.items() if not ts or now - ts[-1] >= window]
+        for k in stale:
+            del _rl_store[k]
     recent = [t for t in _rl_store.get(ip, []) if now - t < window]
     if len(recent) >= limit:
         _rl_store[ip] = recent
