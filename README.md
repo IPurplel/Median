@@ -12,10 +12,10 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 |---|---|
 | 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps |
 | 🎬 **Video** | MP4, MKV, WebM |
-| 🖼️ **Cover + Audio** | Album art merged into a video file |
+| 🖼️ **Cover + Audio** | Album art looped as the video stream alongside the audio · MP4 / MKV / WebM · single tracks or full albums |
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every file (ID3 / Vorbis / MP4) |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers |
-| 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16 · adjustable resolution |
+| 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16, Original ratio · 480p / 720p / 1080p / Original resolution |
 | 📋 **History** | Every download logged with size and format |
 | 📊 **Statistics** | Per-platform and per-artist download totals |
 | 💾 **Backups** | One-click backup and restore |
