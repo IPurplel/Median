@@ -229,6 +229,20 @@ async def process_download(download_id: str, download_params: dict):
                 except Exception as e:
                     app_logger.warning(f"Lyrics fetch failed (non-fatal): {e}")
 
+            # Embed the lyrics into the media tags too (USLT / ©lyr / LYRICS)
+            # so music players display them per song.
+            if lyrics and result.get('file_path'):
+                try:
+                    from backend.utils.tag_writer import embed_lyrics_into_download
+                    tagged = await loop.run_in_executor(
+                        None, embed_lyrics_into_download,
+                        result['file_path'], lyrics, bool(concatenate),
+                    )
+                    if tagged:
+                        app_logger.info(f"Lyrics embedded into {tagged} file(s)")
+                except Exception as e:
+                    app_logger.warning(f"Lyrics tag embed failed (non-fatal): {e}")
+
             update_download_status(
                 download_id, 'completed',
                 progress=100,

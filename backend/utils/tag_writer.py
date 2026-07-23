@@ -58,6 +58,94 @@ def write_tags(
         return False
 
 
+def write_lyrics(file_path: str, lyrics: str) -> bool:
+    """Embed unsynchronized lyrics into a media file's tags. Returns True on success.
+
+    mp3 → ID3 USLT · m4a/mp4 → ©lyr atom · flac/ogg/opus → LYRICS comment.
+    Unsupported containers (mkv/webm) are skipped."""
+    p = Path(file_path)
+    lyrics = (lyrics or '').strip()
+    if not p.is_file() or not lyrics:
+        return False
+    ext = p.suffix.lower().lstrip('.')
+    try:
+        if ext == 'mp3':
+            from mutagen.id3 import ID3, ID3NoHeaderError, USLT
+            try:
+                tags = ID3(file_path)
+            except ID3NoHeaderError:
+                tags = ID3()
+            tags.delall('USLT')
+            tags.add(USLT(encoding=3, lang='eng', desc='', text=lyrics))
+            tags.save(file_path, v2_version=3)
+        elif ext in ('m4a', 'aac', 'mp4', 'm4b'):
+            from mutagen.mp4 import MP4
+            audio = MP4(file_path)
+            audio['\xa9lyr'] = [lyrics]
+            audio.save()
+        elif ext in ('flac', 'ogg', 'opus'):
+            from mutagen import File as MutagenFile
+            audio = MutagenFile(file_path)
+            if audio is None:
+                return False
+            audio['LYRICS'] = [lyrics]
+            audio.save()
+        else:
+            return False
+        return True
+    except Exception as e:
+        app_logger.warning(f"write_lyrics error for {file_path}: {e}")
+        return False
+
+
+def read_title(file_path: str) -> str:
+    """The file's own title tag, or '' — used to match tracks to lyrics."""
+    try:
+        from mutagen import File as MutagenFile
+        audio = MutagenFile(file_path, easy=True)
+        if audio and audio.get('title'):
+            return str(audio['title'][0]).strip()
+    except Exception:
+        pass
+    return ''
+
+
+def embed_lyrics_into_download(path: str, entries: list, merged: bool) -> int:
+    """Embed fetched lyrics into a finished download; returns files tagged.
+
+    - Single track file: its lyrics go straight into the tag.
+    - Merged album file: all lyrics combined (title header per track) in one tag.
+    - Folder of separate tracks: each file matched to its lyrics by the file's
+      own title tag, falling back to filename containment."""
+    p = Path(path)
+    entries = [e for e in (entries or []) if (e.get('lyrics') or '').strip()]
+    if not entries:
+        return 0
+
+    if p.is_file():
+        if merged and len(entries) > 1:
+            text = "\n\n".join(f"{e.get('title') or '?'}\n\n{e['lyrics'].strip()}" for e in entries)
+        else:
+            text = entries[0]['lyrics']
+        return 1 if write_lyrics(str(p), text) else 0
+
+    if not p.is_dir():
+        return 0
+
+    by_title = {(e.get('title') or '').strip().lower(): e['lyrics'] for e in entries}
+    tagged = 0
+    for f in sorted(p.iterdir()):
+        if not f.is_file():
+            continue
+        lyr = by_title.get(read_title(str(f)).lower())
+        if not lyr:
+            stem = f.stem.lower()
+            lyr = next((l for t, l in by_title.items() if t and t in stem), None)
+        if lyr and write_lyrics(str(f), lyr):
+            tagged += 1
+    return tagged
+
+
 def _cover_mime(cover_path: str) -> str:
     return 'image/png' if cover_path.lower().endswith('.png') else 'image/jpeg'
 
