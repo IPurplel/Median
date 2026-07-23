@@ -63,11 +63,17 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 info_flat['entries'] = all_entries
 
             # If flat extraction didn't return per-track durations (common for
-            # Bandcamp), do a full extraction so the album's total time is
-            # accurate. Capped at ENRICH_CAP tracks to keep validation fast.
+            # Bandcamp) or titles (common for SoundCloud sets, whose flat entries
+            # are bare API URLs), do a full extraction so the album's total time,
+            # track titles/artists and thumbnails are accurate. Capped at
+            # ENRICH_CAP tracks to keep validation fast.
             ENRICH_CAP = 60
             has_durations = any((e.get('duration') or 0) > 0 for e in all_entries if e)
-            if (not has_durations) and all_entries and len(all_entries) <= ENRICH_CAP:
+            has_titles = all(
+                ((e.get('title') or e.get('track') or '').strip())
+                for e in all_entries if e
+            )
+            if (not has_durations or not has_titles) and all_entries and len(all_entries) <= ENRICH_CAP:
                 enrich_opts = {
                     'quiet': True, 'no_warnings': True,
                     'extract_flat': False,
@@ -86,12 +92,19 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 info_full = await loop.run_in_executor(None, _enrich)
                 if info_full:
                     full_entries = list(info_full.get('entries', []) or [])
+                    # Fields the playlist parser reads per track — copy every one
+                    # the full extraction populated, not just duration.
+                    _ENRICH_KEYS = (
+                        'duration', 'title', 'track', 'artist', 'uploader',
+                        'channel', 'thumbnail', 'thumbnails', 'webpage_url',
+                    )
                     for i, fe in enumerate(full_entries):
                         if i < len(all_entries) and fe and all_entries[i]:
-                            dur = fe.get('duration') or 0
-                            if dur:
-                                all_entries[i] = dict(all_entries[i])
-                                all_entries[i]['duration'] = dur
+                            all_entries[i] = dict(all_entries[i])
+                            for key in _ENRICH_KEYS:
+                                val = fe.get(key)
+                                if val:
+                                    all_entries[i][key] = val
                     info_flat['entries'] = all_entries
 
             first_entry_info = None
