@@ -320,12 +320,19 @@ async def download_playlist(
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         downloaded_files = []
+        downloaded_tracks = []   # tracks_meta kept 1:1 with downloaded_files —
+                                 # a skipped track must not shift chapters/durations
+                                 # onto the wrong songs
         downloaded_covers = []
 
         try:
             for i, track in enumerate(tracks):
                 track_url = track.get('url', '')
                 if not track_url:
+                    await _warn(
+                        progress_callback,
+                        f"Track {i+1} ({track.get('title', '?')}) has no URL — skipped"
+                    )
                     continue
 
                 pct_base = (i / max(track_count, 1)) * 70
@@ -355,20 +362,26 @@ async def download_playlist(
                     with yt_dlp.YoutubeDL(o) as ydl:
                         ydl.download([u])
 
-                await loop.run_in_executor(None, _dl)
+                try:
+                    await loop.run_in_executor(None, _dl)
+                except Exception as e:
+                    app_logger.warning(f"Track {i+1} download raised: {e}")
 
                 dl_ext = 'mp3' if download_type == 'cover_audio' else ext
                 f = find_downloaded_file(temp_template, dl_ext)
                 if f:
                     downloaded_files.append(f)
+                    downloaded_tracks.append(track)
                     if not track.get('duration'):
                         from backend.utils.ffmpeg_handler import get_media_duration
                         dur = get_media_duration(f)
                         tracks[i]['duration'] = dur or 0
                 else:
                     track_title = track.get('title', f'track {i+1}')
-                    app_logger.warning(f"Track {i+1} ({track_title!r}) failed to download — skipping")
-                    tracks[i]['duration'] = track.get('duration') or 0
+                    await _warn(
+                        progress_callback,
+                        f"Track {i+1} ({track_title}) failed to download — skipped in the merge"
+                    )
 
                 if download_type == 'cover_audio':
                     for img_ext in ('jpg', 'png', 'webp'):
@@ -391,7 +404,7 @@ async def download_playlist(
 
             if download_type == 'audio':
                 ok = await concatenate_audio(
-                    downloaded_files, str(output_path), tracks,
+                    downloaded_files, str(output_path), downloaded_tracks,
                     add_chapters=True, progress_callback=progress_callback,
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
                     bitrate=bitrate,
@@ -412,7 +425,7 @@ async def download_playlist(
                     downloaded_files,
                     cover_file or '',
                     str(output_path),
-                    tracks,
+                    downloaded_tracks,
                     album_meta=_album_meta(metadata, album, artist, album=album),
                     cover_ratio=cover_settings.get('ratio', '1:1') if cover_settings else '1:1',
                     cover_resolution=cover_settings.get('resolution', 'original') if cover_settings else 'original',

@@ -67,10 +67,14 @@ def embed_chapters(
     metadata_path: str,
     output_path: str
 ) -> bool:
+    # -map_chapters 1 is essential: without it ffmpeg keeps chapters from the
+    # first input that has any — e.g. YouTube video chapters embedded in the
+    # source tracks — and silently ignores the album chapters we generated.
     code, _, err = run_ffmpeg([
         '-i', input_path,
         '-i', metadata_path,
         '-map_metadata', '1',
+        '-map_chapters', '1',
         '-codec', 'copy',
         '-y',
         output_path

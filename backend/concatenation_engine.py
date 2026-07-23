@@ -170,10 +170,14 @@ async def _run_hardcut_audio(loop, input_files, output_path):
         _write_concat_manifest(input_files, manifest_path)
 
         def _concat():
+            # -map_chapters -1 drops chapters inherited from the first source
+            # track (e.g. YouTube video chapters); the album's own chapter
+            # markers are written in a separate pass afterwards.
             return run_ffmpeg([
                 '-f', 'concat', '-safe', '0',
                 '-i', manifest_path,
                 '-c', 'copy',
+                '-map_chapters', '-1',
                 '-y', output_path
             ], timeout=settings.CONCAT_AUDIO_TIMEOUT)
 
@@ -195,7 +199,7 @@ async def _run_crossfade_audio(loop, input_files, output_path, crossfade_duratio
     args = []
     for f in input_files:
         args += ['-i', f]
-    args += ['-filter_complex', filt, '-map', f'[{aout}]']
+    args += ['-filter_complex', filt, '-map', f'[{aout}]', '-map_chapters', '-1']
     args += _audio_encoder_args(Path(output_path).suffix, bitrate)
     args += ['-y', output_path]
 
@@ -347,6 +351,7 @@ async def _run_crossfade_video(loop, input_files, output_path, crossfade_duratio
     args += [
         '-filter_complex', filter_complex,
         '-map', f'[{vout}]', '-map', f'[{aout}]',
+        '-map_chapters', '-1',
         '-c:v', settings.VIDEO_CODEC_H264, '-preset', settings.VIDEO_PRESET,
         '-crf', str(settings.VIDEO_CRF),
         '-c:a', settings.AUDIO_CODEC_AAC, '-b:a', settings.AUDIO_BITRATE_DEFAULT,
@@ -418,6 +423,7 @@ async def concatenate_video(
                 '-c:v', settings.VIDEO_CODEC_H264,
                 '-preset', settings.VIDEO_PRESET,
                 '-c:a', settings.AUDIO_CODEC_AAC,
+                '-map_chapters', '-1',
                 '-y',
                 output_path
             ], timeout=settings.CONCAT_VIDEO_TIMEOUT)
