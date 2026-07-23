@@ -553,7 +553,8 @@ def _build_description_md(row, chapters: list) -> str:
             if not l_text:
                 continue
             t = time_by_title.get(l_title.lower())
-            lines += ["", f"{t} - {l_title}" if t else l_title, "", l_text]
+            header = f"## {t} - {l_title}" if t else f"## {l_title}"
+            lines += ["", header, "", l_text]
 
     source_lines = []
     url = (row['url'] or '').strip()
