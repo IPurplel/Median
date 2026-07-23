@@ -52,7 +52,8 @@ def init_db():
             tags TEXT,
             release_date TEXT,
             artist_url TEXT,
-            include_description INTEGER DEFAULT 0
+            include_description INTEGER DEFAULT 0,
+            lyrics TEXT
         );
 
         CREATE TABLE IF NOT EXISTS queue (
@@ -136,6 +137,11 @@ def init_db():
         db.execute("ALTER TABLE downloads ADD COLUMN artist_url TEXT")
     if 'include_description' not in cols:
         db.execute("ALTER TABLE downloads ADD COLUMN include_description INTEGER DEFAULT 0")
+
+    # Migration: per-track lyrics (JSON [{title, lyrics}], Bandcamp only),
+    # rendered into description.md after the tracklist
+    if 'lyrics' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN lyrics TEXT")
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")

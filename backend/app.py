@@ -536,6 +536,25 @@ def _build_description_md(row, chapters: list) -> str:
         lines += ["", "-- TRACKLIST --"]
         lines += [f"{c['time']} - {c['title'] or '?'}" for c in chapters]
 
+    # Lyrics (Bandcamp only): after the tracklist, each track as
+    # "time - name" with its lyric text underneath.
+    try:
+        lyrics = json.loads(row['lyrics']) if ('lyrics' in row.keys() and row['lyrics']) else []
+    except (ValueError, TypeError):
+        lyrics = []
+    if lyrics:
+        time_by_title = {
+            (c['title'] or '').strip().lower(): c['time'] for c in chapters
+        }
+        lines += ["", "-- LYRICS --"]
+        for entry in lyrics:
+            l_title = (entry.get('title') or '?').strip()
+            l_text = (entry.get('lyrics') or '').strip()
+            if not l_text:
+                continue
+            t = time_by_title.get(l_title.lower())
+            lines += ["", f"{t} - {l_title}" if t else l_title, "", l_text]
+
     source_lines = []
     url = (row['url'] or '').strip()
     if url.startswith('http'):

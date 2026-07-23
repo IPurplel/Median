@@ -11,7 +11,7 @@ from backend.config import settings
 
 UPDATABLE_COLUMNS = frozenset({
     'status', 'progress', 'speed', 'eta', 'file_path',
-    'file_size', 'error_message', 'warnings',
+    'file_size', 'error_message', 'warnings', 'lyrics',
 })
 
 active_downloads: Dict[str, asyncio.Task] = {}
@@ -82,6 +82,7 @@ def update_download_status(
     file_size: int = None,
     error_message: str = None,
     warnings: list = None,
+    lyrics: list = None,
 ):
     updates = {}
     updates['status'] = status
@@ -99,6 +100,8 @@ def update_download_status(
         updates['error_message'] = error_message
     if warnings:
         updates['warnings'] = json.dumps(warnings)
+    if lyrics:
+        updates['lyrics'] = json.dumps(lyrics)
     if status == 'completed':
         updates["completed_at"] = "datetime('now')"
 
@@ -213,12 +216,26 @@ async def process_download(download_id: str, download_params: dict):
                     cover_id=cover_id,
                 )
 
+            # Bandcamp publishes lyrics on each track page — fetch them for the
+            # description.md. Non-fatal, and only after the download itself.
+            lyrics = None
+            if metadata.get('platform') == 'bandcamp':
+                try:
+                    from backend.utils.lyrics_fetcher import fetch_bandcamp_lyrics
+                    loop = asyncio.get_running_loop()
+                    lyrics = await loop.run_in_executor(
+                        None, fetch_bandcamp_lyrics, metadata
+                    )
+                except Exception as e:
+                    app_logger.warning(f"Lyrics fetch failed (non-fatal): {e}")
+
             update_download_status(
                 download_id, 'completed',
                 progress=100,
                 file_path=result.get('file_path'),
                 file_size=result.get('file_size', 0),
                 warnings=download_states[download_id].get('warnings'),
+                lyrics=lyrics,
             )
 
             actual_fmt = fmt
