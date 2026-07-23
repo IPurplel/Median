@@ -13,10 +13,14 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps |
 | 🎬 **Video** | MP4, MKV, WebM |
 | 🖼️ **Cover + Audio** | Album art looped as the video stream alongside the audio · MP4 / MKV / WebM · single tracks or full albums |
-| 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every file (ID3 / Vorbis / MP4) |
-| 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers |
+| 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |
+| 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers · track order and chapters always match the album |
+| 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
+| 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, source link, release date, hashtag tags, and artist credits |
 | 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16, Original ratio · 480p / 720p / 1080p / Original resolution |
-| 📋 **History** | Every download logged with size and format |
+| 📋 **History** | Every download logged with size and format · re-download button while the file is still on the server |
+| 🌈 **Themes** | Dark / light toggle plus six extra color themes cycled with one button |
+| ⚠️ **Transparent Fallbacks** | Skipped tracks, crossfade fallbacks, and format limits surface as notes under the download — never silent |
 | 📊 **Statistics** | Per-platform and per-artist download totals |
 | 💾 **Backups** | One-click backup and restore |
 | 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt |
@@ -162,6 +166,8 @@ The full API is served at `/api/`. Key endpoints:
 | `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
 | `DELETE` | `/api/download/{id}` | Cancel a download |
 | `GET` | `/api/download/{id}/file` | Download the completed file as a ZIP |
+| `GET` | `/api/download/{id}/chapters` | Chapter list of a merged file with YouTube-ready timestamps |
+| `GET` | `/api/download/{id}/description.md` | Markdown description (tracklist, source, tags, credits) |
 | `GET` | `/api/queue` | Active and queued downloads |
 | `GET` | `/api/history` | Completed download history |
 | `GET` | `/api/statistics` | Download statistics |
