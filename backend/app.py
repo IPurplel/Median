@@ -589,7 +589,7 @@ def _build_description_md(row, chapters: list) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _get_download_row_and_file(download_id: str):
+def _get_download_row_and_file(download_id: str, allow_dir: bool = False):
     db = get_db()
     try:
         row = db.execute(
@@ -601,7 +601,7 @@ def _get_download_row_and_file(download_id: str):
         raise HTTPException(404, "Download not found")
     file_path = Path(row['file_path']).resolve()
     _assert_within_upload_folder(file_path)
-    if not file_path.is_file():
+    if not (file_path.is_file() or (allow_dir and file_path.is_dir())):
         raise HTTPException(410, "File has been cleaned up")
     return row, file_path
 
@@ -621,9 +621,11 @@ async def download_description_md(download_id: str):
     link, release date, hashtags and a credit/disclaimer line."""
     from fastapi.responses import Response
 
-    row, file_path = _get_download_row_and_file(download_id)
+    # allow_dir: separate-track albums are folders — their description has no
+    # tracklist/timestamps, but source, lyrics, tags and credits still apply.
+    row, file_path = _get_download_row_and_file(download_id, allow_dir=True)
     chapters = []
-    if row['is_concatenated']:
+    if row['is_concatenated'] and file_path.is_file():
         loop = asyncio.get_running_loop()
         chapters = await loop.run_in_executor(None, _read_file_chapters, file_path)
 
