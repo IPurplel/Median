@@ -11,7 +11,7 @@ from backend.config import settings
 
 UPDATABLE_COLUMNS = frozenset({
     'status', 'progress', 'speed', 'eta', 'file_path',
-    'file_size', 'error_message',
+    'file_size', 'error_message', 'warnings',
 })
 
 active_downloads: Dict[str, asyncio.Task] = {}
@@ -74,7 +74,8 @@ def update_download_status(
     eta: str = None,
     file_path: str = None,
     file_size: int = None,
-    error_message: str = None
+    error_message: str = None,
+    warnings: list = None,
 ):
     updates = {}
     updates['status'] = status
@@ -90,6 +91,8 @@ def update_download_status(
         updates['file_size'] = file_size
     if error_message is not None:
         updates['error_message'] = error_message
+    if warnings:
+        updates['warnings'] = json.dumps(warnings)
     if status == 'completed':
         updates["completed_at"] = "datetime('now')"
 
@@ -152,9 +155,14 @@ async def process_download(download_id: str, download_params: dict):
             'source': download_params.get('source', 'manual'),
             'title': metadata.get('title', ''),
             'artist': metadata.get('artist', ''),
+            'warnings': [],
         }
 
-        async def progress_callback(pct: float, message: str = ''):
+        async def progress_callback(pct: float, message: str = '', warning: str = None):
+            if warning:
+                download_states[download_id].setdefault('warnings', []).append(warning)
+            if pct is None:
+                return
             download_states[download_id]['progress'] = pct
             download_states[download_id]['message'] = message
             last = download_states[download_id].get('_last_db_pct', -1)
@@ -203,7 +211,8 @@ async def process_download(download_id: str, download_params: dict):
                 download_id, 'completed',
                 progress=100,
                 file_path=result.get('file_path'),
-                file_size=result.get('file_size', 0)
+                file_size=result.get('file_size', 0),
+                warnings=download_states[download_id].get('warnings'),
             )
 
             actual_fmt = fmt
@@ -297,6 +306,19 @@ def cancel_download(download_id: str) -> bool:
     return False
 
 
+def _parse_warnings(raw) -> list:
+    """DB `warnings` column (JSON array string) → list; tolerate legacy/empty."""
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 def get_download_status(download_id: str) -> Optional[dict]:
     if download_id in download_states:
         return download_states[download_id]
@@ -312,6 +334,7 @@ def get_download_status(download_id: str) -> Optional[dict]:
             d.setdefault('total_tracks', d.get('playlist_count', 0) or 0)
             d['is_playlist'] = bool(d.get('is_playlist'))
             d['is_concatenated'] = bool(d.get('is_concatenated'))
+            d['warnings'] = _parse_warnings(d.get('warnings'))
         return d
     finally:
         db.close()
@@ -328,6 +351,7 @@ def get_queue() -> list:
         result = [row_to_dict(r) for r in rows]
 
         for item in result:
+            item['warnings'] = _parse_warnings(item.get('warnings'))
             if item['id'] in download_states:
                 item.update(download_states[item['id']])
 

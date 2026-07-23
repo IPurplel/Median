@@ -846,6 +846,12 @@ body {
   color: var(--text-3);
 }
 
+.dl-warning {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--yellow);
+}
+
 .dl-actions {
   margin-top: 10px;
   display: flex;
@@ -991,6 +997,36 @@ body {
 
 .history-table tr:last-child td { border-bottom: none; }
 .history-table tr:hover td { background: var(--bg-3); }
+
+.h-title-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.h-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.h-dl-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.h-dl-btn:hover {
+  border-color: var(--accent);
+  background: var(--bg-3);
+}
 
 .history-actions-row {
   display: flex;
@@ -1284,6 +1320,7 @@ body {
 
 .toast.success { border-color: var(--green); }
 .toast.error { border-color: var(--red); }
+.toast.warning { border-color: var(--yellow); }
 .toast.info { border-color: var(--accent); }
 
 @keyframes slideIn {

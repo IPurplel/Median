@@ -711,6 +711,24 @@ async def history(
 
         items = [row_to_dict(r) for r in rows]
 
+        # Flag rows whose file still exists on disk so the UI can offer a
+        # download button only for downloads that weren't cleaned up yet.
+        dl_ids = [i['download_id'] for i in items if i.get('download_id')]
+        dl_rows = {}
+        if dl_ids:
+            placeholders = ','.join('?' * len(dl_ids))
+            for r in db.execute(
+                f"SELECT id, file_path, status FROM downloads WHERE id IN ({placeholders})",
+                dl_ids,
+            ):
+                dl_rows[r['id']] = r
+        for item in items:
+            r = dl_rows.get(item.get('download_id'))
+            item['available'] = bool(
+                r and r['status'] == 'completed' and r['file_path']
+                and Path(r['file_path']).exists()
+            )
+
         return {
             'items': items,
             'total': total,

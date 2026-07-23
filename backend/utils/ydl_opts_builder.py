@@ -88,6 +88,17 @@ def get_ydl_opts(
                 opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=mp4]/best[ext=mp4]/best'
             opts['merge_output_format'] = 'mp4'
 
+        # Embed the thumbnail as cover art: mp4 carries it in the covr atom,
+        # mkv as a 'cover.jpg' attachment. WebM cannot hold embedded images at
+        # all (the spec forbids Matroska attachments), so it is left out —
+        # the downloader surfaces that limitation as a user-facing note.
+        if fmt in ('mp4', 'mkv'):
+            opts['writethumbnail'] = True
+            opts['postprocessors'] = [
+                {'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'},
+                {'key': 'EmbedThumbnail'},
+            ]
+
     elif download_type == 'cover_audio':
         opts['format'] = 'bestaudio/best'
         pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}
@@ -96,8 +107,5 @@ def get_ydl_opts(
         opts['postprocessors'] = [pp]
         opts['writethumbnail'] = True
         opts['postprocessors'].append({'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'})
-
-    if download_type == 'video':
-        opts['writethumbnail'] = False
 
     return opts

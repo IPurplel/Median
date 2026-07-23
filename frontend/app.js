@@ -514,6 +514,16 @@ async function startDownload() {
 
 // ── REAL-TIME PROGRESS (SSE + polling fallback) ───────────────────────────────
 
+// Shared terminal-state notifier: success/error toast, plus one warning toast
+// per non-fatal fallback the backend reported (e.g. crossfade → hard cut).
+function notifyFinished(s, fallbackTitle) {
+  if (s.status === 'completed') {
+    toast(`Downloaded: ${s.title || fallbackTitle}`, 'success');
+    (s.warnings || []).forEach((w) => toast(w, 'warning', 7000));
+  }
+  if (s.status === 'error') toast(`Error: ${s.error_message || 'Download failed'}`, 'error');
+}
+
 let _pageHidden = document.hidden;
 document.addEventListener('visibilitychange', () => {
   _pageHidden = document.hidden;
@@ -526,8 +536,7 @@ document.addEventListener('visibilitychange', () => {
         if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
           clearInterval(activePollers[id]);
           delete activePollers[id];
-          if (s.status === 'completed') toast(`Downloaded: ${s.title || id}`, 'success');
-          if (s.status === 'error') toast(`Error: ${s.error_message || 'Download failed'}`, 'error');
+          notifyFinished(s, id);
         }
       } catch (_) {}
     });
@@ -543,8 +552,7 @@ function _startPolling(id, title) {
       if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
         clearInterval(activePollers[id]);
         delete activePollers[id];
-        if (s.status === 'completed') toast(`Downloaded: ${s.title || title}`, 'success');
-        if (s.status === 'error') toast(`Error: ${s.error_message || 'Download failed'}`, 'error');
+        notifyFinished(s, title);
       }
     } catch (_) {}
   }, 1200);
@@ -572,8 +580,7 @@ function pollDownload(id, title, artist) {
       if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
         src.close();
         delete activeSSE[id];
-        if (s.status === 'completed') toast(`Downloaded: ${s.title || title}`, 'success');
-        if (s.status === 'error') toast(`Error: ${s.error_message || 'Download failed'}`, 'error');
+        notifyFinished(s, title);
       }
     } catch (_) {}
   };
@@ -587,7 +594,7 @@ function pollDownload(id, title, artist) {
   };
 }
 
-function buildDlItem(id, title, artist, status, progress, speed, eta, message, total_tracks, is_concatenated) {
+function buildDlItem(id, title, artist, status, progress, speed, eta, message, total_tracks, is_concatenated, warnings) {
   const statusBadge = {
     queued: '<span class="dl-status-badge badge-queued">Queued</span>',
     downloading: '<span class="dl-status-badge badge-downloading">Downloading</span>',
@@ -619,6 +626,7 @@ function buildDlItem(id, title, artist, status, progress, speed, eta, message, t
       <span>${escHtml(metaLeft)}</span>
       <span>${metaRight}</span>
     </div>
+    ${(warnings || []).map((w) => `<div class="dl-warning">⚠ ${escHtml(w)}</div>`).join('')}
     ${status === 'completed' ? `
       <div class="dl-actions">
         <button class="dl-btn" onclick="downloadFile('${id}')">⬇ Download File</button>
@@ -638,7 +646,8 @@ function updateDlItem(id, s) {
   el.className = `dl-item status-${s.status}`;
   el.innerHTML = buildDlItem(
     id, s.title, s.artist, s.status,
-    s.progress, s.speed, s.eta, s.message, s.total_tracks, s.is_concatenated
+    s.progress, s.speed, s.eta, s.message, s.total_tracks, s.is_concatenated,
+    s.warnings
   );
 }
 
@@ -754,6 +763,7 @@ async function renderQueue() {
           <span>${i + 1} of ${items.length} in queue</span>
           <span>${item.progress ? Math.round(item.progress) + '%' : ''}</span>
         </div>
+        ${(item.warnings || []).map((w) => `<div class="dl-warning">⚠ ${escHtml(w)}</div>`).join('')}
       </div>
     `).join('');
   } catch (err) {
@@ -831,7 +841,12 @@ function renderHistoryTable(data) {
       <tbody>
         ${data.items.map(row => `
           <tr>
-            <td title="${escHtml(row.title || '')}">${escHtml(row.title || '—')}</td>
+            <td title="${escHtml(row.title || '')}">
+              <div class="h-title-cell">
+                <span class="h-title-text">${escHtml(row.title || '—')}</span>
+                ${row.available ? `<button class="h-dl-btn" onclick="downloadFile('${row.download_id}')" title="Download file">⬇</button>` : ''}
+              </div>
+            </td>
             <td>${escHtml(row.artist || '—')}</td>
             <td>${escHtml(row.platform || '—')}</td>
             <td>${escHtml((row.format || '').toUpperCase()) || '—'}</td>
@@ -1084,7 +1099,10 @@ function debounce(fn, ms) {
         const item = document.createElement('div');
         item.className = 'dl-item status-completed';
         item.id = `dl-${id}`;
-        item.innerHTML = buildDlItem(id, s.title || title, s.artist || artist, 'completed', 100, '', '');
+        item.innerHTML = buildDlItem(
+          id, s.title || title, s.artist || artist, 'completed', 100, '', '', '',
+          s.total_tracks, s.is_concatenated, s.warnings
+        );
         activeList.appendChild(item);
       }
     } catch (_) {

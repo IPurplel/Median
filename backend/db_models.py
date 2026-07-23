@@ -47,7 +47,8 @@ def init_db():
             cover_settings TEXT,
             keep_file INTEGER DEFAULT 0,
             queue_position INTEGER,
-            source TEXT DEFAULT 'manual'
+            source TEXT DEFAULT 'manual',
+            warnings TEXT
         );
 
         CREATE TABLE IF NOT EXISTS queue (
@@ -112,6 +113,11 @@ def init_db():
     cols = {r['name'] for r in db.execute("PRAGMA table_info(downloads)").fetchall()}
     if 'source' not in cols:
         db.execute("ALTER TABLE downloads ADD COLUMN source TEXT DEFAULT 'manual'")
+
+    # Migration: add `warnings` column (JSON array of non-fatal fallback notes,
+    # e.g. crossfade → hard cut) so they survive restarts and page reloads
+    if 'warnings' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN warnings TEXT")
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")

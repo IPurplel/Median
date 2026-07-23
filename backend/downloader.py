@@ -12,7 +12,8 @@ from backend.utils.file_organizer import (
     ensure_unique_path, find_downloaded_file
 )
 from backend.concatenation_engine import (
-    concatenate_audio, concatenate_video, create_cover_audio_video
+    concatenate_audio, concatenate_video, create_cover_audio_video,
+    attach_cover_to_mkv,
 )
 from backend.image_processor import download_cover_image
 from backend.logger import app_logger
@@ -69,6 +70,23 @@ async def _resolve_cover_file(
             return result
 
     return None
+
+
+_WEBM_COVER_NOTE = (
+    "WebM files can't hold embedded album art — the cover is saved separately. "
+    "Choose MKV or MP4 if you want it embedded."
+)
+
+
+async def _warn(progress_callback: Optional[Callable], message: str):
+    """Send a non-fatal, user-visible note through the queue's progress channel."""
+    app_logger.warning(message)
+    if not progress_callback:
+        return
+    try:
+        await progress_callback(None, '', warning=message)
+    except TypeError:
+        pass
 
 
 def _embed_mp4_cover(output_path: Path, cover_file: Optional[str], album_meta: dict):
@@ -224,6 +242,8 @@ async def download_single(
 
         if ok and video_output.exists() and video_output.stat().st_size > 0:
             final_path = str(video_output)
+            if out_ext == 'webm':
+                await _warn(progress_callback, _WEBM_COVER_NOTE)
         else:
             raise RuntimeError(
                 "Cover+audio merge failed. Check FFmpeg is installed and the audio/image are valid."
@@ -239,11 +259,22 @@ async def download_single(
                 pass
             raise
 
+        # yt-dlp keeps the written thumbnail file next to the media after
+        # embedding it — sweep any remaining temp-stem side files.
+        for side_file in Path(temp_template).parent.glob(Path(temp_template).name + '*'):
+            try:
+                side_file.unlink()
+            except Exception:
+                pass
+
         # Authoritative tag rewrite. yt-dlp's FFmpegMetadata fills in much of
         # this already, but leaves album empty for YouTube and writes raw
         # YYYYMMDD as the date — fix it here using Median's curated metadata.
         am = _album_meta(metadata, title, artist)
         write_tags(final_path, **am)
+
+        if download_type == 'video' and ext == 'webm':
+            await _warn(progress_callback, _WEBM_COVER_NOTE)
 
     file_size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
 
@@ -396,15 +427,36 @@ async def download_playlist(
             if not ok:
                 raise RuntimeError("Concatenation failed")
 
-            # For audio mode the concat just copies streams, so per-track tags
-            # come along — but album/year/genre at the file level are missing.
-            # Stamp them on the merged file (cover_audio gets these via -metadata
-            # in the ffmpeg merge above).
-            if download_type == 'audio' and output_path.exists():
-                write_tags(str(output_path), **_album_meta(metadata, album, artist, album=album))
+            # Merging drops per-track cover art (the crossfade/concat re-encode
+            # doesn't carry it), and audio concat leaves album/year/genre empty.
+            # Stamp the curated tags plus the album cover onto the merged file.
+            # MKV takes the cover as an attachment, WebM can't embed art at all.
+            am = _album_meta(metadata, album, artist, album=album)
+            out_ext = output_path.suffix.lower()
+            if download_type in ('audio', 'video') and output_path.exists():
+                merged_cover = None
+                if out_ext == '.webm':
+                    await _warn(progress_callback, _WEBM_COVER_NOTE)
+                else:
+                    merged_cover = await _resolve_cover_file(
+                        None, downloaded_covers, metadata.get('thumbnail', ''),
+                        str(temp_dir / 'album_cover.jpg'),
+                    )
+                if out_ext == '.mkv':
+                    if merged_cover:
+                        loop = asyncio.get_running_loop()
+                        if not await loop.run_in_executor(
+                            None, attach_cover_to_mkv, str(output_path), merged_cover
+                        ):
+                            app_logger.warning("Could not attach cover to merged MKV")
+                else:
+                    # mp3/flac/m4a/mp4 all embed via mutagen; unsupported
+                    # extensions are skipped inside write_tags.
+                    write_tags(str(output_path), **am, cover_path=merged_cover)
             if download_type == 'cover_audio':
-                _embed_mp4_cover(output_path, cover_file,
-                                 _album_meta(metadata, album, artist, album=album))
+                _embed_mp4_cover(output_path, cover_file, am)
+                if out_ext == '.webm':
+                    await _warn(progress_callback, _WEBM_COVER_NOTE)
 
             file_size = os.path.getsize(str(output_path)) if output_path.exists() else 0
 
@@ -543,6 +595,17 @@ async def download_playlist(
                         app_logger.debug(f"Removed stray thumbnail: {img_file.name}")
                     except Exception:
                         pass
+
+            # WebM tracks can't carry embedded art — leave a sidecar cover.jpg
+            # in the album folder (players fall back to it) and tell the user.
+            if download_type == 'video' and fmt == 'webm':
+                sidecar = await _resolve_cover_file(
+                    None, [], metadata.get('thumbnail', ''),
+                    str(album_folder / 'cover.jpg'),
+                )
+                if sidecar:
+                    app_logger.info(f"Sidecar cover saved for WebM album: {sidecar}")
+                await _warn(progress_callback, _WEBM_COVER_NOTE)
 
             # For audio mode, yt-dlp tagged each track individually but
             # left album empty. Stamp album/year/genre on every track using

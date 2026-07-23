@@ -37,6 +37,33 @@ def _crossfade_feasible(durations, crossfade_duration, max_tracks):
     return round(d, 3)
 
 
+def _crossfade_skip_reason(durations, max_tracks):
+    """Human-readable reason why _crossfade_feasible returned None (same checks,
+    in the same order) — shown to the user so the hard-cut fallback isn't silent."""
+    n = len(durations)
+    if n < 2:
+        return "only one track"
+    if n > max_tracks:
+        return f"more than {max_tracks} tracks"
+    if any((d or 0) <= 0 for d in durations):
+        return "some track durations are unknown"
+    return "the shortest track is too short to overlap"
+
+
+async def _notify_warning(progress_callback, message):
+    """Surface a non-fatal warning to the user via the progress channel.
+
+    The queue's progress callback accepts a ``warning=`` kwarg; plain (pct, msg)
+    callbacks (tests, other callers) are tolerated and just skip the warning."""
+    app_logger.warning(message)
+    if not progress_callback:
+        return
+    try:
+        await progress_callback(None, '', warning=message)
+    except TypeError:
+        pass
+
+
 def _audio_encoder_args(out_ext, bitrate=""):
     """ffmpeg audio-encoder args for a crossfaded (re-encoded) output by extension."""
     ext = str(out_ext).lower().lstrip('.')
@@ -204,18 +231,25 @@ async def _merge_audio(input_files, output_path, tracks_meta,
     effective = None
     if crossfade:
         cd = crossfade_duration if crossfade_duration is not None else settings.CROSSFADE_DURATION
-        effective = _crossfade_feasible(
-            _collect_durations(input_files, tracks_meta), cd, settings.CROSSFADE_MAX_TRACKS
-        )
+        durations = _collect_durations(input_files, tracks_meta)
+        effective = _crossfade_feasible(durations, cd, settings.CROSSFADE_MAX_TRACKS)
         if effective is None:
-            app_logger.info("Crossfade not feasible for audio merge — using hard-cut concat")
+            await _notify_warning(
+                progress_callback,
+                "Crossfade skipped ("
+                f"{_crossfade_skip_reason(durations, settings.CROSSFADE_MAX_TRACKS)}) — "
+                "tracks were merged with hard cuts instead"
+            )
 
     if effective is not None:
         if progress_callback:
             await progress_callback(10, "Crossfading audio...")
         if await _run_crossfade_audio(loop, input_files, output_path, effective, bitrate):
             return effective
-        app_logger.warning("Audio crossfade failed — falling back to hard-cut concat")
+        await _notify_warning(
+            progress_callback,
+            "Crossfade failed — tracks were merged with hard cuts instead"
+        )
 
     if progress_callback:
         await progress_callback(10, "Concatenating audio...")
@@ -348,11 +382,15 @@ async def concatenate_video(
 
     if crossfade:
         cd = crossfade_duration if crossfade_duration is not None else settings.CROSSFADE_DURATION
-        effective = _crossfade_feasible(
-            _collect_durations(input_files), cd, settings.CROSSFADE_MAX_TRACKS
-        )
+        durations = _collect_durations(input_files)
+        effective = _crossfade_feasible(durations, cd, settings.CROSSFADE_MAX_TRACKS)
         if effective is None:
-            app_logger.info("Crossfade not feasible for video merge — using hard-cut concat")
+            await _notify_warning(
+                progress_callback,
+                "Crossfade skipped ("
+                f"{_crossfade_skip_reason(durations, settings.CROSSFADE_MAX_TRACKS)}) — "
+                "videos were merged with hard cuts instead"
+            )
         else:
             if progress_callback:
                 await progress_callback(10, "Crossfading video...")
@@ -360,7 +398,10 @@ async def concatenate_video(
                 if progress_callback:
                     await progress_callback(100, "Complete")
                 return True
-            app_logger.warning("Video crossfade failed — falling back to hard-cut concat")
+            await _notify_warning(
+                progress_callback,
+                "Crossfade failed — videos were merged with hard cuts instead"
+            )
 
     manifest_path = output_path + ".video_manifest.txt"
     try:
@@ -445,6 +486,27 @@ def _matroska_attachment_args(cover_path: str) -> List[str]:
     ]
 
 
+def attach_cover_to_mkv(mkv_path: str, cover_path: str) -> bool:
+    """Remux an existing MKV in place, adding the cover as a Matroska attachment.
+
+    Stream-copies (no re-encode) into a temp file next to the original, then
+    replaces it atomically. Returns True on success."""
+    att_args = _matroska_attachment_args(cover_path)
+    if not att_args or not os.path.exists(mkv_path):
+        return False
+    tmp_path = mkv_path + ".cover_tmp.mkv"
+    code, _, stderr = run_ffmpeg(
+        ['-i', mkv_path, '-map', '0', '-c', 'copy', *att_args, '-y', tmp_path],
+        timeout=settings.COVER_MERGE_TIMEOUT,
+    )
+    if code != 0 or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+        app_logger.error(f"MKV cover attach failed: {stderr[-400:]}")
+        _safe_remove(tmp_path)
+        return False
+    os.replace(tmp_path, mkv_path)
+    return True
+
+
 async def create_cover_audio_video(
     audio_files: List[str],
     cover_path: str,
@@ -501,9 +563,19 @@ async def create_cover_audio_video(
         audio_for_merge = output_path + f".temp_audio{ext}"
         temp_audio_created = True
 
+        # Forward only warnings to the outer callback: the inner merge reports its
+        # own percentages (10%…) which would drag the cover flow's bar backwards.
+        async def _warnings_only(pct, message='', warning=None):
+            if warning and progress_callback:
+                try:
+                    await progress_callback(None, '', warning=warning)
+                except TypeError:
+                    pass
+
         audio_overlap = await _merge_audio(
             audio_files, audio_for_merge, tracks_meta,
             crossfade=crossfade, crossfade_duration=crossfade_duration,
+            progress_callback=_warnings_only,
         )
         if audio_overlap is None:
             app_logger.error("Audio concatenation failed in cover+audio merge")
