@@ -285,6 +285,16 @@ $('#crossfade-toggle')?.addEventListener('change', (e) => {
   currentCrossfade.enabled = e.target.checked;
   syncCrossfadeUI();
 });
+// ── DESCRIPTION FILE OPTION ───────────────────────────────────────────────────
+// Applies to every download type; the last choice is remembered.
+const _descToggle = $('#description-toggle');
+if (_descToggle) {
+  _descToggle.checked = localStorage.getItem('median_include_description') === '1';
+  _descToggle.addEventListener('change', (e) => {
+    localStorage.setItem('median_include_description', e.target.checked ? '1' : '0');
+  });
+}
+
 $('#crossfade-duration')?.addEventListener('input', (e) => {
   const v = parseFloat(e.target.value);
   currentCrossfade.duration = v;
@@ -495,6 +505,7 @@ async function startDownload() {
       crossfade_duration: currentCrossfade.duration,
       cover_settings: currentDownloadType === 'cover_audio' ? currentCoverSettings : null,
       cover_id: currentDownloadType === 'cover_audio' ? customCoverId : null,
+      include_description: $('#description-toggle')?.checked || false,
     };
 
     const result = await api('POST', '/api/download', body);
@@ -610,6 +621,12 @@ function buildDlItem(id, title, artist, status, progress, speed, eta, message, t
   const tracksSection = showTracks ? `
     <div id="tracks-${id}" class="track-dl-list hidden"></div>` : '';
 
+  // Merged files carry chapter markers — offer them as a copyable tracklist
+  // (YouTube ignores embedded chapters, so uploaders paste this into the description).
+  const showChapters = status === 'completed' && is_concatenated && total_tracks > 1;
+  const chaptersSection = showChapters ? `
+    <div id="chapters-${id}" class="chapters-box hidden"></div>` : '';
+
   return `
     <div class="dl-header">
       <div style="flex:1;min-width:0">
@@ -631,14 +648,60 @@ function buildDlItem(id, title, artist, status, progress, speed, eta, message, t
       <div class="dl-actions">
         <button class="dl-btn" onclick="downloadFile('${id}')">⬇ Download File</button>
         ${showTracks ? `<button class="dl-btn" onclick="toggleTracks('${id}')">↓ Tracks (${total_tracks})</button>` : ''}
+        ${showChapters ? `<button class="dl-btn" onclick="toggleChapters('${id}')">≡ Chapters</button>` : ''}
         <button class="dl-btn" onclick="keepFile('${id}', true)">Keep</button>
       </div>` : status === 'downloading' || status === 'queued' ? `
       <div class="dl-actions">
         <button class="dl-btn danger" onclick="dismissDl('${id}','${status}')">✕ Cancel</button>
       </div>` : ''}
     ${tracksSection}
+    ${chaptersSection}
   `;
 }
+
+// ── CHAPTERS (copyable tracklist for merged files) ────────────────────────────
+async function toggleChapters(id) {
+  const box = $(`#chapters-${id}`);
+  if (!box) return;
+  box.classList.toggle('hidden');
+  if (box.classList.contains('hidden') || box.dataset.loaded) return;
+
+  box.innerHTML = '<div class="empty-msg">Loading chapters…</div>';
+  try {
+    const data = await api('GET', `/api/download/${id}/chapters`);
+    const chs = data.chapters || [];
+    if (!chs.length) {
+      box.innerHTML = '<div class="empty-msg">No chapters found in this file</div>';
+      box.dataset.loaded = 'true';
+      return;
+    }
+    box.dataset.tracklist = '-- TRACKLIST --\n' + chs.map(c => `${c.time} - ${c.title}`).join('\n');
+    box.innerHTML = `
+      <table class="chapters-table"><tbody>
+        ${chs.map(c => `
+          <tr><td class="ch-time">${escHtml(c.time)}</td><td>${escHtml(c.title || '—')}</td></tr>
+        `).join('')}
+      </tbody></table>
+      <button class="dl-btn" onclick="copyChapters('${id}')">⧉ Copy for YouTube description</button>
+      <a class="dl-btn" href="/api/download/${id}/description.md" download>⬇ description.md</a>
+    `;
+    box.dataset.loaded = 'true';
+  } catch (err) {
+    box.innerHTML = `<div class="empty-msg">${escHtml(err.message || 'Could not load chapters')}</div>`;
+  }
+}
+
+function copyChapters(id) {
+  const text = $(`#chapters-${id}`)?.dataset.tracklist || '';
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(
+    () => toast('Tracklist copied — paste it into the YouTube description', 'success'),
+    () => toast('Copy failed — your browser blocked clipboard access', 'error'),
+  );
+}
+
+window.toggleChapters = toggleChapters;
+window.copyChapters = copyChapters;
 
 function updateDlItem(id, s) {
   const el = $(`#dl-${id}`);

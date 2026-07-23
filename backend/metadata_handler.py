@@ -239,6 +239,34 @@ def _extract_genre(info: dict) -> str:
     return ''
 
 
+def _extract_release_date(info: dict) -> str:
+    """Raw YYYYMMDD release date (what Bandcamp/yt-dlp report), or ''."""
+    rd = info.get('release_date') or ''
+    digits = ''.join(c for c in str(rd) if c.isdigit())
+    return digits[:8] if len(digits) >= 8 else ''
+
+
+def _extract_tags(info: dict) -> list:
+    """All platform tags (Bandcamp user tags, etc.), falling back to genre."""
+    for key in ('tags', 'genres'):
+        val = info.get(key)
+        if isinstance(val, list) and val:
+            return [str(t).strip() for t in val if t and str(t).strip()]
+    g = info.get('genre')
+    if g:
+        return [str(g[0] if isinstance(g, list) else g).strip()]
+    return []
+
+
+def _extract_artist_url(info: dict) -> str:
+    """The artist/channel page URL (not the album/track page), when reported."""
+    for key in ('uploader_url', 'channel_url'):
+        v = (info.get(key) or '').strip()
+        if v.startswith('http'):
+            return v
+    return ''
+
+
 def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url: str) -> dict:
     entries = list(flat_info.get('entries', []) or [])
     total_duration = int(sum((e.get('duration') or 0) for e in entries if e))
@@ -295,6 +323,10 @@ def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url
 
     year = _extract_year(flat_info) or (_extract_year(first_entry_info) if first_entry_info else '')
     genre = _extract_genre(flat_info) or (_extract_genre(first_entry_info) if first_entry_info else '')
+    tags = _extract_tags(flat_info) or (_extract_tags(first_entry_info) if first_entry_info else [])
+    release_date = _extract_release_date(flat_info) or (
+        _extract_release_date(first_entry_info) if first_entry_info else ''
+    )
 
     return {
         'is_playlist': True,
@@ -304,6 +336,11 @@ def _parse_metadata_playlist(flat_info: dict, first_entry_info: dict | None, url
         'album': flat_info.get('title') or '',
         'genre': genre,
         'year': year,
+        'tags': tags,
+        'release_date': release_date,
+        'artist_url': _extract_artist_url(flat_info) or (
+            _extract_artist_url(first_entry_info) if first_entry_info else ''
+        ),
         'thumbnail': playlist_thumb,
         'track_count': len(tracks),
         'total_duration': total_duration,
@@ -329,6 +366,9 @@ def _parse_metadata_single(info: dict, url: str) -> dict:
         'album': info.get('album') or '',
         'genre': _extract_genre(info),
         'year': _extract_year(info),
+        'tags': _extract_tags(info),
+        'release_date': _extract_release_date(info),
+        'artist_url': _extract_artist_url(info),
         'duration': int(info.get('duration') or 0),
         'thumbnail': _best_thumbnail(info),
         'url': url,

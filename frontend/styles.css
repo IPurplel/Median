@@ -40,6 +40,8 @@
   --shadow: 0 4px 24px rgba(0,0,0,0.4);
   --shadow-lg: 0 8px 48px rgba(0,0,0,0.6);
 
+  --header-bg: rgba(13,15,20,0.85);
+
   --transition: 0.2s ease;
 }
 
@@ -62,6 +64,122 @@
 
   --shadow: 0 4px 24px rgba(0,0,0,0.08);
   --shadow-lg: 0 8px 48px rgba(0,0,0,0.12);
+
+  --header-bg: rgba(240,242,247,0.85);
+}
+
+/* ── EXTRA THEMES (cycled with the palette button) ───────────────────────── */
+
+/* Sakura — cherry-blossom pink */
+[data-theme="sakura"] {
+  --bg: #fdf1f6;
+  --bg-2: #fffbfd;
+  --bg-3: #fbeef4;
+  --bg-4: #f6e2ec;
+  --border: rgba(150,50,100,0.12);
+  --border-2: rgba(150,50,100,0.2);
+  --text: #3d2733;
+  --text-2: #83626f;
+  --text-3: #b598a5;
+  --accent: #e0559a;
+  --accent-2: #b878e8;
+  --accent-dim: rgba(224,85,154,0.1);
+  --accent-glow: 0 0 20px rgba(224,85,154,0.2);
+  --shadow: 0 4px 24px rgba(150,60,110,0.1);
+  --shadow-lg: 0 8px 48px rgba(150,60,110,0.16);
+  --header-bg: rgba(253,241,246,0.85);
+}
+
+/* Synthwave — neon purple night */
+[data-theme="synthwave"] {
+  --bg: #150d24;
+  --bg-2: #1c1230;
+  --bg-3: #251a3d;
+  --bg-4: #2f2150;
+  --border: rgba(255,120,240,0.12);
+  --border-2: rgba(255,120,240,0.22);
+  --text: #efe6ff;
+  --text-2: #a08fc8;
+  --text-3: #6a5a95;
+  --accent: #ff4fd8;
+  --accent-2: #4fd8ff;
+  --accent-dim: rgba(255,79,216,0.13);
+  --accent-glow: 0 0 20px rgba(255,79,216,0.3);
+  --header-bg: rgba(21,13,36,0.85);
+}
+
+/* Matrix — green phosphor terminal */
+[data-theme="matrix"] {
+  --bg: #050a05;
+  --bg-2: #0a120a;
+  --bg-3: #101c10;
+  --bg-4: #152615;
+  --border: rgba(0,255,65,0.14);
+  --border-2: rgba(0,255,65,0.26);
+  --text: #c8ffc8;
+  --text-2: #66aa66;
+  --text-3: #3d6b3d;
+  --accent: #00ff41;
+  --accent-2: #7dff9a;
+  --accent-dim: rgba(0,255,65,0.1);
+  --accent-glow: 0 0 20px rgba(0,255,65,0.3);
+  --header-bg: rgba(5,10,5,0.85);
+}
+
+/* Ocean — deep sea blues */
+[data-theme="ocean"] {
+  --bg: #071720;
+  --bg-2: #0b202c;
+  --bg-3: #10293a;
+  --bg-4: #153348;
+  --border: rgba(120,200,255,0.1);
+  --border-2: rgba(120,200,255,0.2);
+  --text: #dcedf5;
+  --text-2: #85a8bb;
+  --text-3: #52758a;
+  --accent: #29c5ff;
+  --accent-2: #55ffd4;
+  --accent-dim: rgba(41,197,255,0.11);
+  --accent-glow: 0 0 20px rgba(41,197,255,0.26);
+  --header-bg: rgba(7,23,32,0.85);
+}
+
+/* Sunset — warm amber dusk */
+[data-theme="sunset"] {
+  --bg: #1c1210;
+  --bg-2: #241713;
+  --bg-3: #2e1d17;
+  --bg-4: #3a251d;
+  --border: rgba(255,160,90,0.12);
+  --border-2: rgba(255,160,90,0.22);
+  --text: #ffe9dc;
+  --text-2: #c39a85;
+  --text-3: #8a6a58;
+  --accent: #ff8c42;
+  --accent-2: #ffc94f;
+  --accent-dim: rgba(255,140,66,0.12);
+  --accent-glow: 0 0 20px rgba(255,140,66,0.28);
+  --header-bg: rgba(28,18,16,0.85);
+}
+
+/* Coffee — warm sepia paper */
+[data-theme="coffee"] {
+  --bg: #f3ece2;
+  --bg-2: #fdf8f0;
+  --bg-3: #efe6d8;
+  --bg-4: #e6dac8;
+  --border: rgba(80,55,30,0.13);
+  --border-2: rgba(80,55,30,0.22);
+  --text: #3a2f26;
+  --text-2: #7d6c5c;
+  --text-3: #a89682;
+  --accent: #8c5a3a;
+  --accent-2: #c9a227;
+  --accent-dim: rgba(140,90,58,0.1);
+  --accent-glow: 0 0 20px rgba(140,90,58,0.18);
+  --shadow: 0 4px 24px rgba(80,55,30,0.1);
+  --shadow-lg: 0 8px 48px rgba(80,55,30,0.16);
+  --header-bg: rgba(243,236,226,0.85);
 }
 
 /* ── RESET ──────────────────────────────────────────────────────────────── */
@@ -84,14 +202,10 @@ body {
   position: sticky;
   top: 0;
   z-index: 100;
-  background: rgba(13,15,20,0.85);
+  background: var(--header-bg);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border);
-}
-
-[data-theme="light"] .app-header {
-  background: rgba(240,242,247,0.85);
 }
 
 .header-inner {
@@ -850,6 +964,36 @@ body {
   margin-top: 6px;
   font-size: 11px;
   color: var(--yellow);
+}
+
+.chapters-box {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.chapters-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.chapters-table td {
+  padding: 3px 8px 3px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.chapters-table tr:last-child td { border-bottom: none; }
+
+.chapters-table .ch-time {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  width: 1%;
 }
 
 .dl-actions {

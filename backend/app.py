@@ -168,6 +168,7 @@ class DownloadRequest(BaseModel):
     crossfade_duration: float = settings.CROSSFADE_DURATION
     cover_settings: Optional[CoverSettings] = None
     cover_id: Optional[str] = None
+    include_description: bool = False
 
     @validator("url")
     def url_length(cls, v):
@@ -377,6 +378,7 @@ async def start_download(req: DownloadRequest, request: Request):
         'metadata': meta,
         'cover_settings': cover_settings_dict,
         'cover_id': req.cover_id,
+        'include_description': req.include_description,
     })
 
     return {
@@ -473,6 +475,147 @@ def _title_only(raw: str) -> str:
     return s if s else raw.replace('_', ' ').strip()
 
 
+def _chapter_ts(seconds: float) -> str:
+    total = int(seconds)
+    h, m, s = total // 3600, (total % 3600) // 60, total % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _read_file_chapters(file_path: Path) -> list:
+    """Embedded chapters with YouTube-ready timestamps. Crossfade correction is
+    inherent: the times come from the merged file itself."""
+    from backend.utils.ffmpeg_handler import get_media_chapters
+    return [
+        {'time': _chapter_ts(c['start']), 'start': c['start'], 'title': c['title']}
+        for c in get_media_chapters(str(file_path))
+    ]
+
+
+_PLATFORM_LABELS = {'youtube': 'YouTube', 'soundcloud': 'SoundCloud', 'bandcamp': 'Bandcamp'}
+
+
+def _format_release_date(raw) -> str:
+    """YYYYMMDD → 'March 14, 2011' (the way Bandcamp displays it)."""
+    digits = ''.join(c for c in str(raw or '') if c.isdigit())
+    if len(digits) < 8:
+        return ''
+    try:
+        d = datetime.strptime(digits[:8], '%Y%m%d')
+        return f"{d:%B} {d.day}, {d.year}"
+    except ValueError:
+        return ''
+
+
+def _artist_page_url(row) -> str:
+    """The artist's page (not the album page): stored channel/uploader URL when
+    the platform reports one, otherwise derived from the download URL."""
+    from urllib.parse import urlparse
+
+    stored = (row['artist_url'] if 'artist_url' in row.keys() else '') or ''
+    if stored.startswith('http'):
+        return stored
+    url = (row['url'] or '').strip()
+    p = urlparse(url)
+    if not p.netloc:
+        return url
+    if row['platform'] == 'bandcamp':
+        return f"{p.scheme}://{p.netloc}"           # artist is the subdomain
+    if row['platform'] == 'soundcloud':
+        segments = [s for s in p.path.split('/') if s]
+        if segments:
+            return f"{p.scheme}://{p.netloc}/{segments[0]}"
+    return url
+
+
+def _build_description_md(row, chapters: list) -> str:
+    artist = row['artist'] or 'Unknown Artist'
+    album = row['album'] or row['title'] or 'Album'
+
+    lines = [f"# {artist} / {album}"]
+    if chapters:
+        lines += ["", "-- TRACKLIST --"]
+        lines += [f"{c['time']} - {c['title'] or '?'}" for c in chapters]
+
+    source_lines = []
+    url = (row['url'] or '').strip()
+    if url.startswith('http'):
+        label = _PLATFORM_LABELS.get(row['platform'], (row['platform'] or 'Source').title())
+        source_lines.append(f"{label} : {url}")
+    released = _format_release_date(row['release_date'] if 'release_date' in row.keys() else '')
+    if released:
+        source_lines.append(f"Released : {released}")
+    if source_lines:
+        lines += [""] + source_lines
+
+    try:
+        tags = json.loads(row['tags']) if ('tags' in row.keys() and row['tags']) else []
+    except (ValueError, TypeError):
+        tags = []
+    # Normalize to hashtag form and dedupe (Bandcamp often repeats tags
+    # with case variants), keeping first-seen order.
+    hashtags = []
+    for t in tags:
+        h = '#' + re.sub(r'[^0-9a-z]+', '', str(t).lower())
+        if len(h) > 1 and h not in hashtags:
+            hashtags.append(h)
+    if hashtags:
+        lines += ["", " ".join(hashtags)]
+
+    support_url = _artist_page_url(row) or 'the original release page'
+    lines += ["", (
+        f"No copyright infringement intended. All credit and rights belong to {artist}. "
+        f"Please support the original release here: {support_url}"
+    )]
+
+    return "\n".join(lines) + "\n"
+
+
+def _get_download_row_and_file(download_id: str):
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM downloads WHERE id = ?", (download_id,)
+        ).fetchone()
+    finally:
+        db.close()
+    if not row or not row['file_path']:
+        raise HTTPException(404, "Download not found")
+    file_path = Path(row['file_path']).resolve()
+    _assert_within_upload_folder(file_path)
+    if not file_path.is_file():
+        raise HTTPException(410, "File has been cleaned up")
+    return row, file_path
+
+
+@app.get("/api/download/{download_id}/chapters")
+async def download_chapters(download_id: str):
+    """Embedded chapters of a merged download, with YouTube-ready timestamps."""
+    _, file_path = _get_download_row_and_file(download_id)
+    loop = asyncio.get_running_loop()
+    chapters = await loop.run_in_executor(None, _read_file_chapters, file_path)
+    return {'chapters': chapters}
+
+
+@app.get("/api/download/{download_id}/description.md")
+async def download_description_md(download_id: str):
+    """Markdown description: heading, tracklist (merged albums only), source
+    link, release date, hashtags and a credit/disclaimer line."""
+    from fastapi.responses import Response
+
+    row, file_path = _get_download_row_and_file(download_id)
+    chapters = []
+    if row['is_concatenated']:
+        loop = asyncio.get_running_loop()
+        chapters = await loop.run_in_executor(None, _read_file_chapters, file_path)
+
+    md = _build_description_md(row, chapters)
+    return Response(
+        content=md,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="description.md"'},
+    )
+
+
 @app.get("/api/download/{download_id}/file")
 async def get_file(download_id: str):
     import zipfile, tempfile
@@ -507,6 +650,10 @@ async def get_file(download_id: str):
     tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
     tmp.close()
 
+    include_description = bool(
+        row['include_description'] if 'include_description' in row.keys() else 0
+    )
+
     def build_zip():
         try:
             with zipfile.ZipFile(tmp.name, 'w', zipfile.ZIP_STORED) as zf:
@@ -526,6 +673,15 @@ async def get_file(download_id: str):
                     for f in files:
                         inner = f"{_title_only(f.stem)}{f.suffix}"
                         zf.write(str(f), inner)
+
+                # Opt-in description.md. The tracklist section only exists for
+                # merged single files (chapters live in the file); separate-track
+                # downloads get the source/credits/hashtags without a tracklist.
+                if include_description:
+                    chapters = []
+                    if row['is_concatenated'] and file_path.is_file():
+                        chapters = _read_file_chapters(file_path)
+                    zf.writestr('description.md', _build_description_md(row, chapters))
         except FileNotFoundError:
             raise
 

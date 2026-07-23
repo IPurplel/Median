@@ -37,6 +37,7 @@ def create_download_record(
     concatenate: bool = False,
     cover_settings: Optional[dict] = None,
     source: str = 'manual',
+    include_description: bool = False,
 ) -> str:
     download_id = str(uuid.uuid4())
     db = get_db()
@@ -45,8 +46,9 @@ def create_download_record(
             INSERT INTO downloads
             (id, url, platform, title, artist, album, duration, thumbnail_url,
              download_type, format, bitrate, status, progress, is_playlist,
-             playlist_count, is_concatenated, cover_settings, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, datetime('now'))
+             playlist_count, is_concatenated, cover_settings, source, tags,
+             release_date, artist_url, include_description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """, (
             download_id, url, platform,
             metadata.get('title', ''), metadata.get('artist', ''),
@@ -58,6 +60,10 @@ def create_download_record(
             1 if concatenate else 0,
             json.dumps(cover_settings) if cover_settings else None,
             source,
+            json.dumps(metadata.get('tags') or []),
+            metadata.get('release_date', '') or '',
+            metadata.get('artist_url', '') or '',
+            1 if include_description else 0,
         ))
         db.commit()
     finally:
@@ -285,6 +291,7 @@ async def enqueue_download(download_params: dict) -> str:
         concatenate=download_params.get('concatenate', False),
         cover_settings=download_params.get('cover_settings'),
         source=download_params.get('source', 'manual'),
+        include_description=download_params.get('include_description', False),
     )
 
     task = asyncio.create_task(process_download(download_id, download_params))

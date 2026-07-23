@@ -48,7 +48,11 @@ def init_db():
             keep_file INTEGER DEFAULT 0,
             queue_position INTEGER,
             source TEXT DEFAULT 'manual',
-            warnings TEXT
+            warnings TEXT,
+            tags TEXT,
+            release_date TEXT,
+            artist_url TEXT,
+            include_description INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS queue (
@@ -118,6 +122,20 @@ def init_db():
     # e.g. crossfade → hard cut) so they survive restarts and page reloads
     if 'warnings' not in cols:
         db.execute("ALTER TABLE downloads ADD COLUMN warnings TEXT")
+
+    # Migration: platform tags (JSON array) + raw YYYYMMDD release date,
+    # used by the markdown tracklist (hashtags + "Released" line)
+    if 'tags' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN tags TEXT")
+    if 'release_date' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN release_date TEXT")
+
+    # Migration: artist page URL (for the description's support link) and the
+    # per-download "bundle description.md" opt-in
+    if 'artist_url' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN artist_url TEXT")
+    if 'include_description' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN include_description INTEGER DEFAULT 0")
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")
