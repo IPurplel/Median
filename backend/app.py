@@ -527,21 +527,71 @@ def _artist_page_url(row) -> str:
     return url
 
 
+def _row_json_list(row, column: str) -> list:
+    try:
+        raw = row[column] if column in row.keys() else None
+        parsed = json.loads(raw) if raw else []
+        return parsed if isinstance(parsed, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _description_footer(row, artist: str) -> list:
+    """Source link, release date, hashtags and the credits/disclaimer —
+    shared by the album-wide layout and each per-track block."""
+    lines = []
+    url = (row['url'] or '').strip()
+    if url.startswith('http'):
+        label = _PLATFORM_LABELS.get(row['platform'], (row['platform'] or 'Source').title())
+        lines.append(f"{label} : {url}")
+    released = _format_release_date(row['release_date'] if 'release_date' in row.keys() else '')
+    if released:
+        lines.append(f"Released : {released}")
+
+    # Normalize tags to hashtag form and dedupe (Bandcamp often repeats
+    # tags with case variants), keeping first-seen order.
+    hashtags = []
+    for t in _row_json_list(row, 'tags'):
+        h = '#' + re.sub(r'[^0-9a-z]+', '', str(t).lower())
+        if len(h) > 1 and h not in hashtags:
+            hashtags.append(h)
+    if hashtags:
+        lines += ([""] if lines else []) + [" ".join(hashtags)]
+
+    support_url = _artist_page_url(row) or 'the original release page'
+    lines += ([""] if lines else []) + [(
+        f"No copyright infringement intended. All credit and rights belong to {artist}. "
+        f"Please support the original release here: {support_url}"
+    )]
+    return lines
+
+
 def _build_description_md(row, chapters: list) -> str:
     artist = row['artist'] or 'Unknown Artist'
     album = row['album'] or row['title'] or 'Album'
+    lyrics = [
+        e for e in _row_json_list(row, 'lyrics')
+        if (e.get('lyrics') or '').strip()
+    ]
+    footer = _description_footer(row, artist)
 
+    # Separate-track downloads with lyrics: one self-contained block per song
+    # ("## title" + Lyrics + source/tags/credits), ready to paste per upload.
+    if not chapters and lyrics:
+        blocks = []
+        for entry in lyrics:
+            l_title = (entry.get('title') or '?').strip()
+            blocks.append("\n".join(
+                [f"## {l_title}", "Lyrics:", "", entry['lyrics'].strip(), ""] + footer
+            ))
+        return "\n\n".join(blocks) + "\n"
+
+    # Merged albums (and downloads without lyrics): album-wide layout.
     lines = [f"# {artist} / {album}"]
     if chapters:
         lines += ["", "-- TRACKLIST --"]
         lines += [f"{c['time']} - {c['title'] or '?'}" for c in chapters]
 
-    # Lyrics (Bandcamp only): after the tracklist, each track as
-    # "time - name" with its lyric text underneath.
-    try:
-        lyrics = json.loads(row['lyrics']) if ('lyrics' in row.keys() and row['lyrics']) else []
-    except (ValueError, TypeError):
-        lyrics = []
     if lyrics:
         time_by_title = {
             (c['title'] or '').strip().lower(): c['time'] for c in chapters
@@ -549,46 +599,11 @@ def _build_description_md(row, chapters: list) -> str:
         lines += ["", "-- LYRICS --"]
         for entry in lyrics:
             l_title = (entry.get('title') or '?').strip()
-            l_text = (entry.get('lyrics') or '').strip()
-            if not l_text:
-                continue
             t = time_by_title.get(l_title.lower())
-            # Merged albums get a paste-friendly separator (YouTube descriptions
-            # don't render markdown); separate tracks keep markdown headings.
-            header = f"====== {t} - {l_title} ======" if t else f"## {l_title}"
-            lines += ["", header, "", l_text]
+            header = f"====== {t} - {l_title} ======" if t else f"====== {l_title} ======"
+            lines += ["", header, "", entry['lyrics'].strip()]
 
-    source_lines = []
-    url = (row['url'] or '').strip()
-    if url.startswith('http'):
-        label = _PLATFORM_LABELS.get(row['platform'], (row['platform'] or 'Source').title())
-        source_lines.append(f"{label} : {url}")
-    released = _format_release_date(row['release_date'] if 'release_date' in row.keys() else '')
-    if released:
-        source_lines.append(f"Released : {released}")
-    if source_lines:
-        lines += [""] + source_lines
-
-    try:
-        tags = json.loads(row['tags']) if ('tags' in row.keys() and row['tags']) else []
-    except (ValueError, TypeError):
-        tags = []
-    # Normalize to hashtag form and dedupe (Bandcamp often repeats tags
-    # with case variants), keeping first-seen order.
-    hashtags = []
-    for t in tags:
-        h = '#' + re.sub(r'[^0-9a-z]+', '', str(t).lower())
-        if len(h) > 1 and h not in hashtags:
-            hashtags.append(h)
-    if hashtags:
-        lines += ["", " ".join(hashtags)]
-
-    support_url = _artist_page_url(row) or 'the original release page'
-    lines += ["", (
-        f"No copyright infringement intended. All credit and rights belong to {artist}. "
-        f"Please support the original release here: {support_url}"
-    )]
-
+    lines += [""] + footer
     return "\n".join(lines) + "\n"
 
 
