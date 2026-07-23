@@ -553,7 +553,9 @@ def _build_description_md(row, chapters: list) -> str:
             if not l_text:
                 continue
             t = time_by_title.get(l_title.lower())
-            header = f"## {t} - {l_title}" if t else f"## {l_title}"
+            # Merged albums get a paste-friendly separator (YouTube descriptions
+            # don't render markdown); separate tracks keep markdown headings.
+            header = f"====== {t} - {l_title} ======" if t else f"## {l_title}"
             lines += ["", header, "", l_text]
 
     source_lines = []
