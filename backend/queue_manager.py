@@ -4,7 +4,10 @@ import json
 from datetime import datetime
 from typing import Dict, Optional, Any
 from backend.db_models import get_db, row_to_dict
-from backend.downloader import download_single, download_playlist
+from backend.downloader import (
+    download_single, download_playlist,
+    cleanup_partials, discard_temp_entries,
+)
 from backend.metadata_handler import extract_metadata
 from backend.logger import app_logger
 from backend.config import settings
@@ -13,6 +16,28 @@ UPDATABLE_COLUMNS = frozenset({
     'status', 'progress', 'speed', 'eta', 'file_path',
     'file_size', 'error_message', 'warnings', 'lyrics',
 })
+
+# Failures a second attempt can never fix — retrying them just re-downloads
+# the audio to hit the same wall. Anything not listed here is treated as
+# transient (network, expired URL, HTTP 416 from a stale range) and retried.
+PERMANENT_ERROR_MARKERS = (
+    'cover image not found',
+    'video unavailable',
+    'private video',
+    'members-only',
+    'sign in to confirm your age',
+    'removed by the uploader',
+    'account associated with this video has been terminated',
+    'unsupported url',
+    'requested format is not available',
+    'no video formats found',
+)
+
+
+def _is_permanent_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return any(marker in msg for marker in PERMANENT_ERROR_MARKERS)
+
 
 active_downloads: Dict[str, asyncio.Task] = {}
 download_states: Dict[str, dict] = {}
@@ -198,23 +223,50 @@ async def process_download(download_id: str, download_params: dict):
 
             is_playlist = metadata.get('is_playlist', False)
 
-            if is_playlist:
-                result = await download_playlist(
+            async def _attempt():
+                if is_playlist:
+                    return await download_playlist(
+                        url, download_type, fmt, bitrate, metadata,
+                        concatenate=concatenate,
+                        progress_callback=progress_callback,
+                        cover_settings=cover_settings,
+                        cover_id=cover_id,
+                        crossfade=crossfade,
+                        crossfade_duration=crossfade_duration,
+                        download_id=download_id,
+                    )
+                return await download_single(
                     url, download_type, fmt, bitrate, metadata,
-                    concatenate=concatenate,
                     progress_callback=progress_callback,
                     cover_settings=cover_settings,
                     cover_id=cover_id,
-                    crossfade=crossfade,
-                    crossfade_duration=crossfade_duration,
+                    download_id=download_id,
                 )
-            else:
-                result = await download_single(
-                    url, download_type, fmt, bitrate, metadata,
-                    progress_callback=progress_callback,
-                    cover_settings=cover_settings,
-                    cover_id=cover_id,
+
+            # One automatic fresh retry: transient failures (expired URLs,
+            # HTTP 416 from stale ranges, dropped connections) usually succeed
+            # on a clean second attempt. Partials are deleted between attempts
+            # so nothing stale gets resumed.
+            try:
+                result = await _attempt()
+            except asyncio.CancelledError:
+                raise
+            except Exception as first_err:
+                cleanup_partials(download_id)
+                if _is_permanent_error(first_err):
+                    raise
+                app_logger.warning(
+                    f"Download attempt failed [{download_id[:8]}]: {first_err} — retrying once"
                 )
+                # Rewind progress bookkeeping, otherwise _last_db_pct from the
+                # failed attempt suppresses DB writes until the retry passes it.
+                download_states[download_id].update({
+                    'progress': 0, 'speed': '', 'eta': '',
+                    'message': 'Retrying after a failed attempt...',
+                    '_last_db_pct': -1,
+                })
+                await asyncio.sleep(2)
+                result = await _attempt()
 
             # Bandcamp publishes lyrics on each track page — fetch them for the
             # description.md. Non-fatal, and only after the download itself.
@@ -266,13 +318,18 @@ async def process_download(download_id: str, download_params: dict):
             update_download_status(download_id, 'cancelled')
             download_states[download_id]['status'] = 'cancelled'
             app_logger.info(f"Download cancelled: {download_id[:8]}")
+            # The yt-dlp executor thread may still be writing; delete what's
+            # there now — the stale-partial sweep catches any late stragglers.
+            cleanup_partials(download_id)
         except Exception as e:
             error_msg = str(e)
+            cleanup_partials(download_id)
             update_download_status(download_id, 'error', error_message=error_msg)
             download_states[download_id]['status'] = 'error'
             download_states[download_id]['error'] = error_msg
             app_logger.error(f"Download error [{download_id[:8]}]: {error_msg}")
         finally:
+            discard_temp_entries(download_id)
             if download_id in active_downloads:
                 del active_downloads[download_id]
             t = asyncio.create_task(_deferred_state_cleanup(download_id))

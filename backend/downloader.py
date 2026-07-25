@@ -34,6 +34,64 @@ def _album_meta(metadata: dict, title: str, artist: str, album: str = '') -> dic
 
 CUSTOM_COVER_DIR = settings.custom_cover_path
 
+# Temp paths each in-flight download writes to, keyed by download id, so the
+# queue can delete leftovers when a download errors or is cancelled.
+# Entry kinds: 'stem' (unlink every file matching <path>*), 'dir' (rmtree the
+# whole dir), 'partials' (only remove .part/.ytdl inside — the dir may hold
+# finished tracks worth keeping).
+_temp_registry: Dict[str, list] = {}
+
+PARTIAL_SUFFIXES = ('.part', '.ytdl')
+
+
+def _register_temp(download_id: Optional[str], kind: str, path) -> None:
+    if download_id:
+        _temp_registry.setdefault(download_id, []).append((kind, str(path)))
+
+
+def discard_temp_entries(download_id: str) -> None:
+    """Forget a download's temp paths without touching the filesystem."""
+    _temp_registry.pop(download_id, None)
+
+
+def cleanup_partials(download_id: str) -> int:
+    """Delete the partial files a failed/cancelled download left behind.
+
+    Returns the number of filesystem entries removed. Safe to call for ids
+    that never registered anything.
+    """
+    removed = 0
+    for kind, raw in _temp_registry.pop(download_id, []):
+        path = Path(raw)
+        try:
+            if kind == 'dir':
+                if path.is_dir():
+                    shutil.rmtree(str(path), ignore_errors=True)
+                    removed += 1
+            elif kind == 'stem':
+                for f in path.parent.glob(path.name + '*'):
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+            elif kind == 'partials':
+                if path.is_dir():
+                    for f in path.rglob('*'):
+                        if f.is_file() and f.suffix.lower() in PARTIAL_SUFFIXES:
+                            try:
+                                f.unlink()
+                                removed += 1
+                            except OSError:
+                                pass
+        except OSError as e:
+            app_logger.warning(f"Partial cleanup error for {raw}: {e}")
+    if removed:
+        app_logger.info(
+            f"Removed {removed} leftover partial file(s) for {download_id[:8]}"
+        )
+    return removed
+
 
 async def _resolve_cover_file(
     cover_id: Optional[str],
@@ -105,6 +163,7 @@ async def download_single(
     progress_callback: Optional[Callable] = None,
     cover_settings: Optional[dict] = None,
     cover_id: Optional[str] = None,
+    download_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     import yt_dlp
 
@@ -121,6 +180,7 @@ async def download_single(
     filename = get_single_track_filename(artist, title, ext)
     output_path = ensure_unique_path(download_dir / filename)
     temp_template = str(download_dir / f"_tmp_{uuid.uuid4().hex}")
+    _register_temp(download_id, 'stem', temp_template)
 
     last_progress = {'pct': 0, 'speed': '', 'eta': ''}
 
@@ -301,6 +361,7 @@ async def download_playlist(
     cover_id: Optional[str] = None,
     crossfade: bool = False,
     crossfade_duration: Optional[float] = None,
+    download_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     import yt_dlp
 
@@ -318,6 +379,7 @@ async def download_playlist(
     if concatenate:
         temp_dir = download_dir / f"_concat_{uuid.uuid4().hex}"
         temp_dir.mkdir(parents=True, exist_ok=True)
+        _register_temp(download_id, 'dir', temp_dir)
 
         downloaded_files = []
         downloaded_tracks = []   # tracks_meta kept 1:1 with downloaded_files —
@@ -489,6 +551,7 @@ async def download_playlist(
     else:
         album_folder = download_dir / get_playlist_folder(artist, album)
         album_folder.mkdir(parents=True, exist_ok=True)
+        _register_temp(download_id, 'partials', album_folder)
 
         ydl_opts = get_ydl_opts(download_type, fmt, bitrate,
                                   str(album_folder / '%(autonumber)03d - %(title)s.%(ext)s'))
