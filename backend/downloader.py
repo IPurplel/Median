@@ -362,6 +362,7 @@ async def download_playlist(
     crossfade: bool = False,
     crossfade_duration: Optional[float] = None,
     download_id: Optional[str] = None,
+    selected_indices: Optional[list] = None,
 ) -> Dict[str, Any]:
     import yt_dlp
 
@@ -553,8 +554,18 @@ async def download_playlist(
         album_folder.mkdir(parents=True, exist_ok=True)
         _register_temp(download_id, 'partials', album_folder)
 
+        # With a partial selection, keep each track's original album position in
+        # the filename so picked tracks still sort alongside the rest of the
+        # album (autonumber would renumber them 1..N). Falls back to autonumber
+        # on platforms that don't report playlist_index.
+        number_field = (
+            '%(playlist_index,autonumber)03d' if selected_indices else '%(autonumber)03d'
+        )
         ydl_opts = get_ydl_opts(download_type, fmt, bitrate,
-                                  str(album_folder / '%(autonumber)03d - %(title)s.%(ext)s'))
+                                  str(album_folder / f'{number_field} - %(title)s.%(ext)s'))
+        if selected_indices:
+            # Tell yt-dlp to fetch only the ticked tracks rather than the album.
+            ydl_opts['playlist_items'] = ','.join(str(i) for i in selected_indices)
 
         loop = asyncio.get_running_loop()
         completed = [0]

@@ -169,12 +169,28 @@ class DownloadRequest(BaseModel):
     cover_settings: Optional[CoverSettings] = None
     cover_id: Optional[str] = None
     include_description: bool = False
+    # 1-based positions in the validated tracklist. None/empty means every
+    # track — only a partial selection needs to be sent.
+    selected_tracks: Optional[List[int]] = None
 
     @validator("url")
     def url_length(cls, v):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
         return v
+
+    @validator("selected_tracks")
+    def selected_tracks_valid(cls, v):
+        if not v:
+            return None
+        cleaned = sorted({i for i in v if isinstance(i, int) and i >= 1})
+        if not cleaned:
+            raise ValueError("selected_tracks must contain positive track numbers")
+        if len(cleaned) > settings.MAX_PLAYLIST_TRACKS:
+            raise ValueError(
+                f"Too many tracks selected (max {settings.MAX_PLAYLIST_TRACKS})"
+            )
+        return cleaned
 
     @validator("crossfade_duration")
     def crossfade_duration_valid(cls, v):
@@ -384,6 +400,31 @@ async def validate(req: ValidateRequest, request: Request):
     return meta
 
 
+def _apply_track_selection(meta: dict, selected: Optional[List[int]]):
+    """Narrow an album's metadata to the tracks the user ticked.
+
+    Returns (metadata, selected_indices). `selected_indices` are the original
+    1-based positions, which the downloader hands to yt-dlp as `playlist_items`
+    so only those tracks are fetched. The metadata's own track list is filtered
+    to match, keeping tag/title lookups aligned with what actually downloads.
+    """
+    tracks = meta.get('tracks') or []
+    if not selected or not meta.get('is_playlist') or not tracks:
+        return meta, None
+
+    indices = [i for i in selected if 1 <= i <= len(tracks)]
+    if not indices:
+        raise HTTPException(400, "No valid tracks selected")
+    if len(indices) == len(tracks):
+        return meta, None  # everything ticked — same as a normal download
+
+    meta = dict(meta)
+    meta['tracks'] = [tracks[i - 1] for i in indices]
+    meta['track_count'] = len(indices)
+    meta['total_duration'] = sum((t.get('duration') or 0) for t in meta['tracks'])
+    return meta, indices
+
+
 @app.post("/api/download", dependencies=[Depends(require_token)])
 async def start_download(req: DownloadRequest, request: Request):
     ip = _get_client_ip(request)
@@ -399,6 +440,8 @@ async def start_download(req: DownloadRequest, request: Request):
 
     meta['platform'] = platform
 
+    meta, selected_indices = _apply_track_selection(meta, req.selected_tracks)
+
     cover_settings_dict = req.cover_settings.dict() if req.cover_settings else None
 
     download_id = await enqueue_download({
@@ -413,6 +456,7 @@ async def start_download(req: DownloadRequest, request: Request):
         'cover_settings': cover_settings_dict,
         'cover_id': req.cover_id,
         'include_description': req.include_description,
+        'selected_indices': selected_indices,
     })
 
     return {

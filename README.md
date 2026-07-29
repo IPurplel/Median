@@ -15,6 +15,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🖼️ **Cover + Audio** | Album art looped as the video stream alongside the audio · MP4 / MKV / WebM · single tracks or full albums |
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers · track order and chapters always match the album |
+| ☑️ **Pick Your Tracks** | Every track on an album is listed with a tick box — untick the songs you don't want and only the rest are downloaded · works for separate tracks and merged files alike · picked songs keep their original album track numbers |
 | 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` |
 | 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
 | 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, lyrics, source link, release date, hashtag tags, and artist credits |
@@ -130,6 +131,15 @@ Artist Name - Album Name/
 ```
 
 Merged playlists produce a single file: `Artist Name - Album Name.mp3`
+
+Picking only some tracks keeps their original album positions, so they still sort correctly against the full album — selecting tracks 2, 5 and 6 gives:
+
+```
+Artist Name - Album Name/
+  002 - Track Two.mp3
+  005 - Track Five.mp3
+  006 - Track Six.mp3
+```
 
 A whole-discography download queues each album separately, so they stay organized side by side:
 

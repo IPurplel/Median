@@ -237,6 +237,7 @@ async def process_download(download_id: str, download_params: dict):
         cover_id = download_params.get('cover_id')
         crossfade = download_params.get('crossfade', False)
         crossfade_duration = download_params.get('crossfade_duration')
+        selected_indices = download_params.get('selected_indices')
 
         download_states[download_id] = {
             'id': download_id,
@@ -308,6 +309,7 @@ async def process_download(download_id: str, download_params: dict):
                         crossfade=crossfade,
                         crossfade_duration=crossfade_duration,
                         download_id=download_id,
+                        selected_indices=selected_indices,
                     )
                 return await download_single(
                     url, download_type, fmt, bitrate, metadata,

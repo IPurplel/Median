@@ -230,19 +230,29 @@ function renderMeta(meta) {
   }
   $('#meta-sub').textContent = sub;
 
-  // Track list
+  // Track list — every track is tickable, so songs you don't want can be
+  // dropped before downloading. All tracks are rendered (not just a preview):
+  // you can't untick what you can't see.
   const tracksList = $('#tracks-list');
+  const tracksHead = $('#tracks-head');
   if (meta.is_playlist && meta.tracks?.length) {
     tracksList.classList.remove('hidden');
-    tracksList.innerHTML = meta.tracks.slice(0, 50).map((t, i) => `
-      <div class="track-item">
+    tracksHead.classList.remove('hidden');
+    tracksList.innerHTML = meta.tracks.map((t, i) => `
+      <label class="track-item">
+        <input type="checkbox" class="track-check" data-idx="${i + 1}" checked>
         <span class="track-num">${i + 1}</span>
         <span class="track-name">${escHtml(t.title)}</span>
         <span class="track-dur">${t.duration ? fmtDur(t.duration) : ''}</span>
-      </div>
+      </label>
     `).join('');
+    $$('#tracks-list .track-check').forEach(cb => {
+      cb.addEventListener('change', updateTrackStatus);
+    });
+    updateTrackStatus();
   } else {
     tracksList.classList.add('hidden');
+    tracksHead.classList.add('hidden');
   }
 
   // Show Cover+Audio tab only for SoundCloud / Bandcamp (have album art)
@@ -264,6 +274,52 @@ function renderMeta(meta) {
     if (xfToggle) xfToggle.checked = false;
     currentCrossfade.enabled = false;
     $('#crossfade-duration-row')?.classList.add('hidden');
+  }
+}
+
+// ── TRACK PICKER ──────────────────────────────────────────────────────────────
+// Untick any song you don't want and only the ticked ones get downloaded.
+// Ticking everything is identical to a plain album download.
+
+function selectedTrackNumbers() {
+  return [...$$('#tracks-list .track-check')]
+    .filter(cb => cb.checked)
+    .map(cb => Number(cb.dataset.idx));
+}
+
+function updateTrackStatus() {
+  const total = $$('#tracks-list .track-check').length;
+  const picked = selectedTrackNumbers().length;
+  const status = $('#tracks-status');
+  if (status) status.textContent = `${picked} of ${total} tracks selected`;
+  const btn = $('#tracks-selectall');
+  if (btn) btn.textContent = picked === total ? 'Deselect all' : 'Select all';
+}
+
+$('#tracks-selectall')?.addEventListener('click', () => {
+  const boxes = [...$$('#tracks-list .track-check')];
+  const turnOn = boxes.some(cb => !cb.checked);
+  boxes.forEach(cb => { cb.checked = turnOn; });
+  updateTrackStatus();
+});
+
+// Whole-discography mode downloads albums whose tracklists haven't been fetched
+// yet, so a per-track choice can't apply to them — the picker is reset and
+// locked while that mode is on.
+function syncTrackPickerForDiscography() {
+  const on = !!$('#discography-toggle')?.checked;
+  const boxes = [...$$('#tracks-list .track-check')];
+  if (!boxes.length) return;
+  boxes.forEach(cb => {
+    if (on) cb.checked = true;
+    cb.disabled = on;
+  });
+  $('#tracks-selectall')?.classList.toggle('hidden', on);
+  const status = $('#tracks-status');
+  if (on && status) {
+    status.textContent = 'All tracks — picking songs applies to single-album downloads';
+  } else {
+    updateTrackStatus();
   }
 }
 
@@ -379,6 +435,7 @@ async function loadDiscography() {
 $('#discography-toggle')?.addEventListener('change', (e) => {
   const panel = $('#discography-panel');
   panel.classList.toggle('hidden', !e.target.checked);
+  syncTrackPickerForDiscography();
   if (e.target.checked && !discography) loadDiscography();
 });
 
@@ -611,6 +668,18 @@ async function startDownload() {
       cover_id: currentDownloadType === 'cover_audio' ? customCoverId : null,
       include_description: $('#description-toggle')?.checked || false,
     };
+
+    // Only send a track selection when it's actually partial — everything
+    // ticked is just a normal album download.
+    const trackTotal = $$('#tracks-list .track-check').length;
+    const pickedTracks = selectedTrackNumbers();
+    if (trackTotal && pickedTracks.length < trackTotal) {
+      if (!pickedTracks.length) {
+        toast('Select at least one track to download', 'error');
+        return;
+      }
+      body.selected_tracks = pickedTracks;
+    }
 
     // Whole-discography mode: one queued download per selected album, each
     // landing in its own folder. Everything else on this form applies to all
