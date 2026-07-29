@@ -16,7 +16,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers · track order and chapters always match the album |
 | ☑️ **Pick Your Tracks** | Every track on an album is listed with a tick box — untick the songs you don't want and only the rest are downloaded · works for separate tracks and merged files alike · picked songs keep their original album track numbers |
-| 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` |
+| 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` · grab the lot afterwards as one zip, a folder per album |
 | 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
 | 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, lyrics, source link, release date, hashtag tags, and artist credits |
 | 📝 **Lyrics** | Bandcamp lyrics fetched automatically and embedded in the media tags (ID3 USLT / ©lyr / Vorbis) per track — combined into one tag for merged albums — plus included in `description.md` |
@@ -187,6 +187,8 @@ The full API is served at `/api/`. Key endpoints:
 | `POST` | `/api/download` | Queue a download |
 | `POST` | `/api/discography` | List every album by the artist behind a URL |
 | `POST` | `/api/discography/download` | Queue one download per album, each in its own folder |
+| `GET` | `/api/discography/batch/{id}` | Progress of one discography batch |
+| `GET` | `/api/discography/batch/{id}/file` | Every finished album of a batch as one streamed zip |
 | `GET` | `/api/download/{id}/status` | Poll download status |
 | `GET` | `/api/downloads/status?ids=` | Poll many downloads in one request (used by discography batches) |
 | `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |

@@ -53,7 +53,8 @@ def init_db():
             release_date TEXT,
             artist_url TEXT,
             include_description INTEGER DEFAULT 0,
-            lyrics TEXT
+            lyrics TEXT,
+            batch_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS queue (
@@ -142,6 +143,14 @@ def init_db():
     # rendered into description.md after the tracklist
     if 'lyrics' not in cols:
         db.execute("ALTER TABLE downloads ADD COLUMN lyrics TEXT")
+
+    # Migration: groups the albums queued by one "download every album by this
+    # artist" click, so they can be tracked and zipped together afterwards
+    if 'batch_id' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN batch_id TEXT")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_downloads_batch ON downloads(batch_id)"
+        )
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")

@@ -697,7 +697,7 @@ async function startDownload() {
       });
       toast(`Queued ${batch.queued.length} album${batch.queued.length === 1 ? '' : 's'}`, 'success');
       batch.skipped?.forEach(s => toast(`Skipped ${s.url}: ${s.reason}`, 'warning', 6000));
-      pollDownloadBatch(batch.queued, batch.artist);
+      pollDownloadBatch(batch.queued, batch.artist, batch.batch_id);
       activeSection.classList.remove('hidden');
 
       const qBody = $('#queue-body');
@@ -805,7 +805,17 @@ function pollDownload(id, title, artist) {
 // A discography batch queues one download per album. One EventSource each
 // would blow past the browser's ~6-connections-per-host limit and stall the
 // rest of the page, so the whole batch shares a single polling request.
-function pollDownloadBatch(items, artist) {
+function pollDownloadBatch(items, artist, batchId) {
+  if (batchId) {
+    const banner = document.createElement('div');
+    banner.className = 'dl-item batch-banner';
+    banner.id = `batch-${batchId}`;
+    banner.innerHTML = `
+      <div class="batch-title">${escHtml(artist || 'Discography')} — ${items.length} albums</div>
+      <div class="batch-status" id="batch-status-${batchId}">Queued ${items.length} albums…</div>`;
+    activeList.prepend(banner);
+  }
+
   const titles = {};
   items.forEach((d) => {
     titles[d.download_id] = d.title;
@@ -822,7 +832,16 @@ function pollDownloadBatch(items, artist) {
   const tick = async () => {
     // Cards the user dismissed (which also cancels them) stop being polled.
     [...pending].forEach((id) => { if (!$(`#dl-${id}`)) pending.delete(id); });
-    if (!pending.size) { clearInterval(timer); return; }
+    if (!pending.size) {
+      clearInterval(timer);
+      if (batchId) finishBatch(batchId, items.length);
+      return;
+    }
+    const statusEl = batchId && $(`#batch-status-${batchId}`);
+    if (statusEl) {
+      statusEl.textContent =
+        `${items.length - pending.size} of ${items.length} albums finished…`;
+    }
 
     let states;
     try {
@@ -845,6 +864,40 @@ function pollDownloadBatch(items, artist) {
 
   timer = setInterval(tick, 1500);
   tick();
+}
+
+// Once every album in a batch has settled, offer them all as one zip.
+async function finishBatch(batchId, total) {
+  const el = $(`#batch-status-${batchId}`);
+  if (!el) return;
+
+  let s;
+  try {
+    s = await api('GET', `/api/discography/batch/${batchId}`);
+  } catch (err) {
+    el.textContent = 'Could not read batch status: ' + err.message;
+    return;
+  }
+
+  if (!s.completed) {
+    el.textContent = `All ${s.total} albums finished, but none downloaded successfully.`;
+    return;
+  }
+
+  const failedNote = s.failed ? ` · ${s.failed} failed` : '';
+  el.innerHTML = `
+    <div>${s.completed} of ${s.total} albums ready${escHtml(failedNote)} · ${fmtSize(s.total_size)}</div>
+    <button class="dl-btn batch-dl-btn" onclick="downloadBatchZip('${batchId}')">
+      ⬇ Download all albums as one zip
+    </button>`;
+}
+
+// Straight navigation rather than fetch+blob: a discography can run to
+// gigabytes, and buffering that in a blob would exhaust the tab's memory.
+// Letting the browser handle the response streams it to disk with its own
+// progress and resume handling.
+function downloadBatchZip(batchId) {
+  window.location.href = `/api/discography/batch/${batchId}/file`;
 }
 
 function buildDlItem(id, title, artist, status, progress, speed, eta, message, total_tracks, is_concatenated, warnings) {

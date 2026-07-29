@@ -63,6 +63,8 @@ def create_download_record(
     cover_settings: Optional[dict] = None,
     source: str = 'manual',
     include_description: bool = False,
+    batch_id: Optional[str] = None,
+    keep_file: bool = False,
 ) -> str:
     download_id = str(uuid.uuid4())
     db = get_db()
@@ -72,8 +74,9 @@ def create_download_record(
             (id, url, platform, title, artist, album, duration, thumbnail_url,
              download_type, format, bitrate, status, progress, is_playlist,
              playlist_count, is_concatenated, cover_settings, source, tags,
-             release_date, artist_url, include_description, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+             release_date, artist_url, include_description, batch_id, keep_file,
+             created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """, (
             download_id, url, platform,
             metadata.get('title', ''), metadata.get('artist', ''),
@@ -89,6 +92,8 @@ def create_download_record(
             metadata.get('release_date', '') or '',
             metadata.get('artist_url', '') or '',
             1 if include_description else 0,
+            batch_id,
+            1 if keep_file else 0,
         ))
         db.commit()
     finally:
@@ -456,6 +461,11 @@ async def enqueue_download(download_params: dict) -> str:
         cover_settings=download_params.get('cover_settings'),
         source=download_params.get('source', 'manual'),
         include_description=download_params.get('include_description', False),
+        batch_id=download_params.get('batch_id'),
+        # Discography albums are held from auto-cleanup until the combined zip
+        # is fetched — otherwise the first albums expire while the last ones
+        # are still downloading, and the zip would silently be incomplete.
+        keep_file=download_params.get('keep_file', False),
     )
 
     task = asyncio.create_task(process_download(download_id, download_params))

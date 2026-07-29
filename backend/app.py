@@ -527,6 +527,7 @@ async def start_discography_download(req: DiscographyDownloadRequest, request: R
 
     cover_settings_dict = req.cover_settings.dict() if req.cover_settings else None
     artist = base_meta.get('artist', '')
+    batch_id = str(uuid.uuid4())
 
     queued, skipped = [], []
     seen = set()
@@ -556,6 +557,10 @@ async def start_discography_download(req: DiscographyDownloadRequest, request: R
             'cover_id': None,
             'include_description': req.include_description,
             'source': 'discography',
+            'batch_id': batch_id,
+            # Held from auto-cleanup until the combined zip is fetched, so the
+            # first albums don't expire while the last ones are still running.
+            'keep_file': True,
             'metadata': {
                 'is_playlist': True,
                 'platform': platform,
@@ -573,8 +578,260 @@ async def start_discography_download(req: DiscographyDownloadRequest, request: R
     if not queued:
         raise HTTPException(422, "None of the selected albums could be queued")
 
-    app_logger.info(f"Discography queued: {len(queued)} album(s) for {artist or req.url}")
-    return {'artist': artist, 'queued': queued, 'skipped': skipped}
+    app_logger.info(
+        f"Discography queued [{batch_id[:8]}]: {len(queued)} album(s) "
+        f"for {artist or req.url}"
+    )
+    return {
+        'artist': artist,
+        'batch_id': batch_id,
+        'queued': queued,
+        'skipped': skipped,
+    }
+
+
+_TERMINAL_STATES = ('completed', 'error', 'cancelled', 'cleaned')
+
+
+def _batch_rows(batch_id: str) -> list:
+    if not is_valid_uuid(batch_id):
+        raise HTTPException(400, "Invalid batch id")
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT * FROM downloads WHERE batch_id = ? ORDER BY created_at ASC",
+            (batch_id,)
+        ).fetchall()
+    finally:
+        db.close()
+    if not rows:
+        raise HTTPException(404, "Batch not found")
+    return rows
+
+
+@app.get("/api/discography/batch/{batch_id}")
+async def discography_batch(batch_id: str):
+    """Progress of one 'download every album' click.
+
+    The combined zip is only worth offering once every album has settled, so
+    the UI polls this to know when to show the button.
+    """
+    rows = _batch_rows(batch_id)
+    albums = [{
+        'download_id': r['id'],
+        'title': r['title'] or r['album'] or '',
+        'status': r['status'],
+        'file_size': r['file_size'] or 0,
+    } for r in rows]
+
+    done = [a for a in albums if a['status'] in _TERMINAL_STATES]
+    ready = [a for a in albums if a['status'] == 'completed']
+    return {
+        'batch_id': batch_id,
+        'artist': rows[0]['artist'] or '',
+        'total': len(albums),
+        'finished': len(done),
+        'completed': len(ready),
+        'failed': len(done) - len(ready),
+        'in_progress': len(albums) - len(done),
+        'all_done': len(done) == len(albums),
+        'total_size': sum(a['file_size'] for a in ready),
+        'albums': albums,
+    }
+
+
+class _ZipSink:
+    """File-like target that hands whatever zipfile writes straight back out.
+
+    Lets the archive be streamed as it is built instead of staged to a temp
+    file first — a discography can run to a couple of gigabytes, and writing
+    that to disk before sending a byte would both stall the browser and need
+    the space twice over.
+    """
+
+    def __init__(self):
+        self._buf = bytearray()
+        self._pos = 0
+
+    def write(self, data) -> int:
+        self._buf += data
+        self._pos += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self._pos
+
+    def flush(self):
+        pass
+
+    def seekable(self) -> bool:
+        return False
+
+    def close(self):
+        pass
+
+    def drain(self) -> bytes:
+        chunk = bytes(self._buf)
+        del self._buf[:]
+        return chunk
+
+
+def _short_error(message: str) -> str:
+    """Trim yt-dlp's 'please report this issue on ...' boilerplate, which buries
+    the one useful clause in a wall of text."""
+    text = (message or '').strip()
+    for marker in ('; please report', 'please report this issue'):
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[:idx]
+            break
+    return text[:200].strip().rstrip(';')
+
+
+def _album_zip_entries(row) -> list:
+    """(source path, path inside the zip) for one album in the combined zip."""
+    from backend.utils.validators import sanitize_filename
+
+    raw = row['file_path']
+    if not raw:
+        return []
+    path = Path(raw).resolve()
+    try:
+        _assert_within_upload_folder(path)
+    except HTTPException:
+        return []
+    if not path.exists():
+        return []
+
+    folder = sanitize_filename(row['album'] or row['title'] or 'Album') or 'Album'
+    if path.is_file():
+        # A merged album is a single file — still give it its own folder so
+        # every album unzips the same way.
+        return [(path, f"{folder}/{_title_only(path.stem)}{path.suffix}")]
+
+    return [
+        (f, f"{folder}/{_title_only(f.stem)}{f.suffix}")
+        for f in sorted(path.iterdir())
+        if f.is_file() and not f.name.startswith('.')
+    ]
+
+
+@app.get("/api/discography/batch/{batch_id}/file")
+async def get_batch_file(batch_id: str):
+    """Every finished album of a batch as one zip, a folder per album.
+
+    Streamed as it is built. Albums that failed are listed in a README inside
+    the archive rather than silently omitted.
+    """
+    import zipfile
+
+    rows = _batch_rows(batch_id)
+    completed = [r for r in rows if r['status'] == 'completed']
+    if not completed:
+        raise HTTPException(404, "No completed albums in this batch yet")
+
+    entries, included = [], []
+    for row in completed:
+        album_entries = _album_zip_entries(row)
+        if album_entries:
+            entries.extend(album_entries)
+            included.append(row['album'] or row['title'] or 'Album')
+
+    if not entries:
+        raise HTTPException(410, "Album files have been cleaned up — please download again.")
+
+    missing = [
+        f"{r['album'] or r['title'] or 'Album'} — {r['status']}"
+        f"{': ' + _short_error(r['error_message']) if r['error_message'] else ''}"
+        for r in rows if r['status'] != 'completed'
+    ]
+
+    from backend.utils.validators import sanitize_filename
+    artist = sanitize_filename(rows[0]['artist'] or '') or 'Discography'
+    zip_name = f"{artist} - Discography.zip"
+
+    async def stream():
+        loop = asyncio.get_running_loop()
+        sink = _ZipSink()
+        # ZIP_STORED: audio is already compressed, so deflating it burns CPU
+        # for nothing — this is purely a container.
+        zf = zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED)
+        try:
+            for src, arcname in entries:
+                try:
+                    handle = open(str(src), 'rb')
+                except OSError as e:
+                    app_logger.warning(f"Batch zip skipped {src}: {e}")
+                    continue
+                try:
+                    # Carry the real file time across — zipfile otherwise
+                    # stamps every entry 1980-01-01, which looks broken once
+                    # extracted and confuses library "date added" sorting.
+                    try:
+                        stamp = time.localtime(src.stat().st_mtime)[:6]
+                    except OSError:
+                        stamp = time.localtime()[:6]
+                    info = zipfile.ZipInfo(arcname, date_time=stamp)
+                    info.compress_type = zipfile.ZIP_STORED
+                    with zf.open(info, 'w') as dest:
+                        while True:
+                            # File I/O in a worker thread — a multi-GB archive
+                            # would otherwise block the loop for the whole
+                            # transfer, stalling progress streams and the
+                            # container healthcheck.
+                            data = await loop.run_in_executor(None, handle.read, 65536)
+                            if not data:
+                                break
+                            await loop.run_in_executor(None, dest.write, data)
+                            out = sink.drain()
+                            if out:
+                                yield out
+                finally:
+                    handle.close()
+                out = sink.drain()
+                if out:
+                    yield out
+
+            if missing:
+                note = (
+                    "Some albums are not in this archive:\n\n"
+                    + "\n".join(f"  - {m}" for m in missing)
+                    + "\n\nRe-queue them from Median to try again.\n"
+                )
+                zf.writestr("MISSING ALBUMS.txt", note)
+        finally:
+            zf.close()
+
+        out = sink.drain()
+        if out:
+            yield out
+
+        # The albums were held back from auto-cleanup until now; let the normal
+        # retention window take over again.
+        await loop.run_in_executor(None, _release_batch_keep, batch_id)
+
+    app_logger.info(
+        f"Streaming batch zip [{batch_id[:8]}]: {len(included)} album(s), "
+        f"{len(missing)} missing"
+    )
+    return StreamingResponse(
+        stream(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+
+def _release_batch_keep(batch_id: str):
+    db = get_db()
+    try:
+        db.execute(
+            "UPDATE downloads SET keep_file = 0 WHERE batch_id = ?", (batch_id,)
+        )
+        db.commit()
+    except Exception as e:
+        app_logger.warning(f"Could not release keep flag for batch {batch_id}: {e}")
+    finally:
+        db.close()
 
 
 @app.get("/api/downloads/status")
