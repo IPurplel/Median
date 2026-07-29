@@ -82,6 +82,7 @@ All options live in `.env`. None are required — the defaults are production-re
 | `CLEANUP_INTERVAL` | `90` | Minutes until completed downloads are auto-deleted. Doubles as the sweep interval, so real retention is 90–180 min |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
 | `MAX_DISCOGRAPHY_ALBUMS` | `100` | Maximum albums a single discography download may queue |
+| `BATCH_HOLD_HOURS` | `3` | Hours a finished discography batch is kept from auto-cleanup while waiting to be collected |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
 | `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
 | `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |

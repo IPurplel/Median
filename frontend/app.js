@@ -807,13 +807,9 @@ function pollDownload(id, title, artist) {
 // rest of the page, so the whole batch shares a single polling request.
 function pollDownloadBatch(items, artist, batchId) {
   if (batchId) {
-    const banner = document.createElement('div');
-    banner.className = 'dl-item batch-banner';
-    banner.id = `batch-${batchId}`;
-    banner.innerHTML = `
-      <div class="batch-title">${escHtml(artist || 'Discography')} — ${items.length} albums</div>
-      <div class="batch-status" id="batch-status-${batchId}">Queued ${items.length} albums…</div>`;
-    activeList.prepend(banner);
+    _batchBanner(batchId, artist, items.length);
+    const el = $(`#batch-status-${batchId}`);
+    if (el) el.textContent = `Queued ${items.length} albums…`;
   }
 
   const titles = {};
@@ -834,7 +830,7 @@ function pollDownloadBatch(items, artist, batchId) {
     [...pending].forEach((id) => { if (!$(`#dl-${id}`)) pending.delete(id); });
     if (!pending.size) {
       clearInterval(timer);
-      if (batchId) finishBatch(batchId, items.length);
+      if (batchId) finishBatch(batchId);
       return;
     }
     const statusEl = batchId && $(`#batch-status-${batchId}`);
@@ -867,7 +863,7 @@ function pollDownloadBatch(items, artist, batchId) {
 }
 
 // Once every album in a batch has settled, offer them all as one zip.
-async function finishBatch(batchId, total) {
+async function finishBatch(batchId) {
   const el = $(`#batch-status-${batchId}`);
   if (!el) return;
 
@@ -898,6 +894,63 @@ async function finishBatch(batchId, total) {
 // progress and resume handling.
 function downloadBatchZip(batchId) {
   window.location.href = `/api/discography/batch/${batchId}/file`;
+}
+
+function _batchBanner(batchId, artist, total) {
+  let banner = $(`#batch-${batchId}`);
+  if (banner) return banner;
+  banner = document.createElement('div');
+  banner.className = 'dl-item batch-banner';
+  banner.id = `batch-${batchId}`;
+  banner.innerHTML = `
+    <div class="batch-title">${escHtml(artist || 'Discography')} — ${total} albums</div>
+    <div class="batch-status" id="batch-status-${batchId}">Loading…</div>`;
+  activeList.prepend(banner);
+  return banner;
+}
+
+// A discography runs for hours, so coming back to a fresh page is normal — not
+// an edge case. Batches are re-read from the server on load so the combined-zip
+// button survives a refresh instead of living only in the tab that started it.
+async function restoreBatches() {
+  let data;
+  try {
+    data = await api('GET', '/api/discography/batches');
+  } catch (_) {
+    return;
+  }
+  const batches = data.batches || [];
+  if (!batches.length) return;
+
+  activeSection.classList.remove('hidden');
+  batches.forEach((b) => {
+    _batchBanner(b.batch_id, b.artist, b.total);
+    if (b.all_done) finishBatch(b.batch_id);
+    else pollBatchSummary(b.batch_id);
+  });
+}
+
+// Used for restored batches, where the per-album cards aren't on the page —
+// the batch summary alone is enough to track progress and offer the zip.
+function pollBatchSummary(batchId) {
+  const tick = async () => {
+    const el = $(`#batch-status-${batchId}`);
+    if (!el) { clearInterval(timer); return; }
+    let s;
+    try {
+      s = await api('GET', `/api/discography/batch/${batchId}`);
+    } catch (_) {
+      return;  // transient — try again next tick
+    }
+    if (s.all_done) {
+      clearInterval(timer);
+      finishBatch(batchId);
+      return;
+    }
+    el.textContent = `${s.finished} of ${s.total} albums finished…`;
+  };
+  const timer = setInterval(tick, 3000);
+  tick();
 }
 
 function buildDlItem(id, title, artist, status, progress, speed, eta, message, total_tracks, is_concatenated, warnings) {
@@ -1435,6 +1488,7 @@ function debounce(fn, ms) {
 (function init() {
   checkPlatforms();
   setInterval(checkPlatforms, 60000);
+  restoreBatches();
 
   // Bug #16 fix: Restore active downloads from localStorage but validate each ID
   // against the server first — skip IDs that no longer exist in the DB.

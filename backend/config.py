@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # Ceiling on "download the artist's whole discography" — one queued
     # download per album, so this caps how much a single click can enqueue.
     MAX_DISCOGRAPHY_ALBUMS: int = 100
+    # Discography albums are exempt from auto-cleanup until the combined zip is
+    # collected, otherwise the earliest ones expire while the last are still
+    # downloading. This releases an uncollected batch anyway, counted from when
+    # its LAST album finished — never from when it was queued, which would drop
+    # the hold mid-run and reintroduce the very problem it prevents.
+    BATCH_HOLD_HOURS: int = 3
     CORS_ORIGINS: str = "*"
 
     # Does double duty: how often the cleanup job runs AND how old a completed
@@ -118,6 +124,8 @@ def validate_settings():
         errors.append("MAX_PLAYLIST_TRACKS must be positive")
     if settings.MAX_DISCOGRAPHY_ALBUMS <= 0:
         errors.append("MAX_DISCOGRAPHY_ALBUMS must be positive")
+    if settings.BATCH_HOLD_HOURS <= 0:
+        errors.append("BATCH_HOLD_HOURS must be positive")
     if errors:
         raise ValueError("Invalid configuration:\n" + "\n".join(f"  - {e}" for e in errors))
 

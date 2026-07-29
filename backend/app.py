@@ -609,6 +609,48 @@ def _batch_rows(batch_id: str) -> list:
     return rows
 
 
+@app.get("/api/discography/batches")
+async def discography_batches():
+    """Discography batches still worth showing — running, or finished but not
+    yet collected.
+
+    Without this the combined-zip button would live only in the tab that
+    started the batch: a refresh, or coming back later (which is normal, since
+    a large discography runs for hours) would leave no way to reach the zip.
+    """
+    db = get_db()
+    try:
+        rows = db.execute("""
+            SELECT batch_id,
+                   MAX(artist) AS artist,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status IN ('queued','downloading') THEN 1 ELSE 0 END) AS running,
+                   SUM(CASE WHEN keep_file = 1 THEN 1 ELSE 0 END) AS held,
+                   SUM(COALESCE(file_size, 0)) AS total_size,
+                   MAX(COALESCE(completed_at, created_at)) AS last_activity
+            FROM downloads
+            WHERE batch_id IS NOT NULL
+            GROUP BY batch_id
+            HAVING running > 0 OR held > 0
+            ORDER BY last_activity DESC
+            LIMIT 10
+        """).fetchall()
+    finally:
+        db.close()
+
+    return {'batches': [{
+        'batch_id': r['batch_id'],
+        'artist': r['artist'] or '',
+        'total': r['total'],
+        'completed': r['completed'],
+        'failed': r['total'] - r['completed'] - r['running'],
+        'in_progress': r['running'],
+        'all_done': r['running'] == 0,
+        'total_size': r['total_size'] or 0,
+    } for r in rows]}
+
+
 @app.get("/api/discography/batch/{batch_id}")
 async def discography_batch(batch_id: str):
     """Progress of one 'download every album' click.

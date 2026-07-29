@@ -72,6 +72,66 @@ async def cleanup_old_downloads():
         db.close()
 
 
+async def release_stale_batches():
+    """Drop the cleanup exemption on discography batches nobody collected.
+
+    Batch albums are held so a long run's early albums don't expire before the
+    combined zip exists. If the zip is never fetched they would sit forever, so
+    the hold is released once the batch has been finished and untouched for
+    BATCH_HOLD_HOURS — after which the ordinary retention window applies.
+
+    The age is measured from the batch's newest completion, never from when it
+    was queued: a 70-album run takes hours, and counting from the start would
+    release the hold mid-run and delete the albums already downloaded.
+    """
+    from backend.queue_manager import active_downloads
+
+    db = get_db()
+    try:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=settings.BATCH_HOLD_HOURS)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+
+        candidates = db.execute("""
+            SELECT batch_id, MAX(COALESCE(completed_at, created_at)) AS last_activity
+            FROM downloads
+            WHERE batch_id IS NOT NULL AND keep_file = 1
+            GROUP BY batch_id
+            HAVING last_activity < ?
+        """, (cutoff,)).fetchall()
+
+        released = 0
+        for row in candidates:
+            batch_id = row['batch_id']
+            ids = [
+                r['id'] for r in db.execute(
+                    "SELECT id FROM downloads WHERE batch_id = ?", (batch_id,)
+                ).fetchall()
+            ]
+            # A batch still genuinely running keeps its hold, however old its
+            # earliest albums are. Checking the live task map rather than the
+            # stored status also frees batches left mid-flight by a restart,
+            # whose rows stay 'downloading' forever and would never release.
+            if any(i in active_downloads for i in ids):
+                continue
+
+            db.execute(
+                "UPDATE downloads SET keep_file = 0 WHERE batch_id = ?", (batch_id,)
+            )
+            released += 1
+            app_logger.info(
+                f"Released uncollected discography batch {batch_id[:8]} "
+                f"({len(ids)} album(s)) — normal cleanup applies now"
+            )
+
+        if released:
+            db.commit()
+    except Exception as e:
+        app_logger.error(f"Batch hold release error: {e}")
+    finally:
+        db.close()
+
+
 _STALE_PARTIAL_AGE = timedelta(hours=1)
 
 
@@ -222,6 +282,13 @@ def start_scheduler():
         # Run once right at startup so leftovers from before this fix
         # (or from a crash) get cleaned on boot.
         next_run_time=datetime.now(timezone.utc),
+    )
+
+    scheduler.add_job(
+        release_stale_batches,
+        IntervalTrigger(minutes=20),
+        id='release_stale_batches',
+        replace_existing=True
     )
 
     scheduler.add_job(
