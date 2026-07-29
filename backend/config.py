@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 20
     MAX_URL_LENGTH: int = 2048
     MAX_PLAYLIST_TRACKS: int = 500
+    # Ceiling on "download the artist's whole discography" — one queued
+    # download per album, so this caps how much a single click can enqueue.
+    MAX_DISCOGRAPHY_ALBUMS: int = 100
     CORS_ORIGINS: str = "*"
 
     CLEANUP_INTERVAL: int = 15
@@ -109,6 +112,8 @@ def validate_settings():
         errors.append("MAX_URL_LENGTH must be at least 64")
     if settings.MAX_PLAYLIST_TRACKS <= 0:
         errors.append("MAX_PLAYLIST_TRACKS must be positive")
+    if settings.MAX_DISCOGRAPHY_ALBUMS <= 0:
+        errors.append("MAX_DISCOGRAPHY_ALBUMS must be positive")
     if errors:
         raise ValueError("Invalid configuration:\n" + "\n".join(f"  - {e}" for e in errors))
 

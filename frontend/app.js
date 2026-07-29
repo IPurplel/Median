@@ -10,6 +10,8 @@ let currentBitrate = '320';
 let currentCoverSettings = { ratio: '1:1', resolution: 'original', output_format: 'mp4' };
 let currentCrossfade = { enabled: false, duration: 2.0 };
 let customCoverId = null;
+let discography = null;   // { artist, albums: [...] } once resolved for this URL
+let discoLoading = false;
 let activePollers = {};  // download_id -> setInterval id (polling fallback)
 let activeSSE = {};     // download_id -> EventSource
 
@@ -89,6 +91,7 @@ urlInput.addEventListener('input', () => {
   if (currentMeta) {
     currentMeta = null;
     metaSection.classList.add('hidden');
+    resetDiscographyUI();
   }
 
   let found = null;
@@ -141,6 +144,7 @@ async function validateURL() {
 
 // ── RENDER META ───────────────────────────────────────────────────────────────
 function renderMeta(meta) {
+  resetDiscographyUI();
   const thumbEl = $('#meta-thumbnail');
   const rawThumbUrl = meta.thumbnail || '';
 
@@ -216,11 +220,13 @@ function renderMeta(meta) {
     }
     if (totalDurStr) sub += ` · ${totalDurStr}`;
     $('#concat-option').classList.remove('hidden');
+    $('#discography-option').classList.remove('hidden');
     syncCrossfadeUI();
   } else {
     if (meta.duration_display) sub = meta.duration_display;
     $('#concat-option').classList.add('hidden');
     $('#crossfade-option').classList.add('hidden');
+    $('#discography-option').classList.add('hidden');
   }
   $('#meta-sub').textContent = sub;
 
@@ -285,6 +291,104 @@ $('#crossfade-toggle')?.addEventListener('change', (e) => {
   currentCrossfade.enabled = e.target.checked;
   syncCrossfadeUI();
 });
+// ── FULL DISCOGRAPHY OPTION ───────────────────────────────────────────────────
+// Turning the toggle on looks up every album by the same artist and lists them
+// with a checkbox each, so the user can drop the ones they already have.
+// Each checked album is queued as its own download → its own folder.
+
+function resetDiscographyUI() {
+  discography = null;
+  discoLoading = false;
+  const toggle = $('#discography-toggle');
+  if (toggle) toggle.checked = false;
+  $('#discography-panel')?.classList.add('hidden');
+  $('#discography-list')?.classList.add('hidden');
+  $('#discography-selectall')?.classList.add('hidden');
+  const list = $('#discography-list');
+  if (list) list.innerHTML = '';
+  const status = $('#discography-status');
+  if (status) status.textContent = '';
+}
+
+function selectedAlbums() {
+  if (!discography?.albums?.length) return [];
+  return [...$$('#discography-list .disco-check')]
+    .filter(cb => cb.checked)
+    .map(cb => discography.albums[Number(cb.dataset.idx)])
+    .filter(Boolean);
+}
+
+function updateDiscoStatus() {
+  const total = discography?.albums?.length || 0;
+  const picked = selectedAlbums().length;
+  const status = $('#discography-status');
+  if (status) status.textContent = `${picked} of ${total} albums selected`;
+  const btn = $('#discography-selectall');
+  if (btn) btn.textContent = picked === total ? 'Deselect all' : 'Select all';
+}
+
+function renderDiscography() {
+  const list = $('#discography-list');
+  const albums = discography?.albums || [];
+
+  if (!albums.length) {
+    list.classList.add('hidden');
+    $('#discography-selectall').classList.add('hidden');
+    $('#discography-status').textContent =
+      discography?.note || 'No other albums found for this artist.';
+    return;
+  }
+
+  list.innerHTML = albums.map((a, i) => `
+    <label class="disco-item">
+      <input type="checkbox" class="disco-check" data-idx="${i}" checked>
+      <span class="disco-name">${escHtml(a.title)}</span>
+      ${a.track_count ? `<span class="disco-count">${a.track_count} tracks</span>` : ''}
+    </label>
+  `).join('');
+
+  list.classList.remove('hidden');
+  $('#discography-selectall').classList.remove('hidden');
+  $$('#discography-list .disco-check').forEach(cb => {
+    cb.addEventListener('change', updateDiscoStatus);
+  });
+  updateDiscoStatus();
+}
+
+async function loadDiscography() {
+  if (discoLoading) return;
+  const url = urlInput.value.trim();
+  if (!url) return;
+
+  discoLoading = true;
+  $('#discography-status').textContent = 'Looking up the artist’s albums…';
+  $('#discography-list').classList.add('hidden');
+  $('#discography-selectall').classList.add('hidden');
+
+  try {
+    discography = await api('POST', '/api/discography', { url });
+    renderDiscography();
+  } catch (err) {
+    discography = null;
+    $('#discography-status').textContent = 'Lookup failed: ' + err.message;
+  } finally {
+    discoLoading = false;
+  }
+}
+
+$('#discography-toggle')?.addEventListener('change', (e) => {
+  const panel = $('#discography-panel');
+  panel.classList.toggle('hidden', !e.target.checked);
+  if (e.target.checked && !discography) loadDiscography();
+});
+
+$('#discography-selectall')?.addEventListener('click', () => {
+  const boxes = [...$$('#discography-list .disco-check')];
+  const turnOn = boxes.some(cb => !cb.checked);
+  boxes.forEach(cb => { cb.checked = turnOn; });
+  updateDiscoStatus();
+});
+
 // ── DESCRIPTION FILE OPTION ───────────────────────────────────────────────────
 // Applies to every download type; the last choice is remembered.
 const _descToggle = $('#description-toggle');
@@ -508,6 +612,30 @@ async function startDownload() {
       include_description: $('#description-toggle')?.checked || false,
     };
 
+    // Whole-discography mode: one queued download per selected album, each
+    // landing in its own folder. Everything else on this form applies to all
+    // of them (format, bitrate, description.md, merge).
+    const wantsDiscography = $('#discography-toggle')?.checked;
+    if (wantsDiscography) {
+      const albums = selectedAlbums();
+      if (!albums.length) {
+        toast('Select at least one album, or turn the discography option off', 'error');
+        return;
+      }
+      const batch = await api('POST', '/api/discography/download', {
+        ...body,
+        albums: albums.map(a => ({ url: a.url, title: a.title })),
+      });
+      toast(`Queued ${batch.queued.length} album${batch.queued.length === 1 ? '' : 's'}`, 'success');
+      batch.skipped?.forEach(s => toast(`Skipped ${s.url}: ${s.reason}`, 'warning', 6000));
+      pollDownloadBatch(batch.queued, batch.artist);
+      activeSection.classList.remove('hidden');
+
+      const qBody = $('#queue-body');
+      if (qBody.classList.contains('open')) renderQueue();
+      return;
+    }
+
     const result = await api('POST', '/api/download', body);
     toast(`Download queued: ${result.title || url}`, 'success');
     pollDownload(result.download_id, result.title, result.artist);
@@ -603,6 +731,51 @@ function pollDownload(id, title, artist) {
     }
     _startPolling(id, title);
   };
+}
+
+// A discography batch queues one download per album. One EventSource each
+// would blow past the browser's ~6-connections-per-host limit and stall the
+// rest of the page, so the whole batch shares a single polling request.
+function pollDownloadBatch(items, artist) {
+  const titles = {};
+  items.forEach((d) => {
+    titles[d.download_id] = d.title;
+    const item = document.createElement('div');
+    item.className = 'dl-item status-queued';
+    item.id = `dl-${d.download_id}`;
+    item.innerHTML = buildDlItem(d.download_id, d.title, artist, 'queued', 0, '', '', '', 0, false);
+    activeList.prepend(item);
+  });
+
+  const pending = new Set(items.map((d) => d.download_id));
+  let timer = null;
+
+  const tick = async () => {
+    // Cards the user dismissed (which also cancels them) stop being polled.
+    [...pending].forEach((id) => { if (!$(`#dl-${id}`)) pending.delete(id); });
+    if (!pending.size) { clearInterval(timer); return; }
+
+    let states;
+    try {
+      states = await api('GET', `/api/downloads/status?ids=${[...pending].join(',')}`);
+    } catch (_) {
+      return;  // transient — try again next tick
+    }
+
+    [...pending].forEach((id) => {
+      const s = states[id];
+      // An id the server no longer knows about is never coming back.
+      if (!s) { pending.delete(id); return; }
+      updateDlItem(id, s);
+      if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
+        pending.delete(id);
+        notifyFinished(s, titles[id]);
+      }
+    });
+  };
+
+  timer = setInterval(tick, 1500);
+  tick();
 }
 
 function buildDlItem(id, title, artist, status, progress, speed, eta, message, total_tracks, is_concatenated, warnings) {

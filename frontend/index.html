@@ -171,6 +171,27 @@
             </label>
           </div>
 
+          <!-- FULL DISCOGRAPHY (albums / playlists) -->
+          <div class="concat-option hidden" id="discography-option">
+            <label class="toggle-label">
+              <input type="checkbox" id="discography-toggle" class="toggle-input">
+              <span class="toggle-track"></span>
+              <span class="toggle-text">
+                <strong>Download every album by this artist</strong>
+                <span>— each album goes into its own folder</span>
+              </span>
+            </label>
+            <div class="disco-panel hidden" id="discography-panel">
+              <div class="disco-head">
+                <span class="disco-status" id="discography-status"></span>
+                <button type="button" class="disco-selectall hidden" id="discography-selectall">
+                  Deselect all
+                </button>
+              </div>
+              <div class="disco-list hidden" id="discography-list"></div>
+            </div>
+          </div>
+
           <!-- CONCATENATE OPTION (playlists) -->
           <div class="concat-option hidden" id="concat-option">
             <label class="toggle-label">
@@ -368,19 +389,26 @@
         <div class="help-step">
           <div class="step-num">5</div>
           <div class="step-content">
+            <strong>For albums: grab the artist's whole discography</strong>
+            <p>Toggle <em>Download every album by this artist</em> and Median looks up the artist's releases page, then lists every album it finds with a checkbox each — untick the ones you already have, or use <em>Select all</em> / <em>Deselect all</em>. Each ticked album is queued as its own download and lands in its own <em>Artist - Album</em> folder, with its own cover, tags and <code>description.md</code>. Every other setting on the form (format, bitrate, merge, description) applies to all of them. They download a few at a time rather than all at once, so a large discography works through the queue steadily.</p>
+          </div>
+        </div>
+        <div class="help-step">
+          <div class="step-num">6</div>
+          <div class="step-content">
             <strong>Hit Download</strong>
             <p>The download runs in the background. Track it in the <em>Active Downloads</em> section. When done, the file is available for 15 minutes before auto-cleanup — press <em>Keep</em> on the finished download to protect it. Album covers are embedded automatically (MP3/FLAC/AAC tags, MP4/MKV containers); WebM can't hold embedded art, so the cover is saved separately and a note tells you so.</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">6</div>
+          <div class="step-num">7</div>
           <div class="step-content">
             <strong>Chapters &amp; the description file</strong>
             <p>Turn on <em>Include description.md</em> before downloading to bundle a markdown file with your download: the tracklist (for merged albums, with crossfade-corrected timestamps), Bandcamp lyrics (also embedded into each file's tags so music players show them), the source link, the release date, the album tags as hashtags, and a credits line. On a finished merged album, the <em>≡ Chapters</em> button shows the chapter table with <em>Copy for YouTube description</em> — paste it into a YouTube description and YouTube creates the chapters (it ignores chapters embedded in the file itself).</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">7</div>
+          <div class="step-num">8</div>
           <div class="step-content">
             <strong>History, queue &amp; themes</strong>
             <p>The <em>History</em> panel lists past downloads — a ⬇ button appears next to a song's name while its file is still on the server, so you can grab it again. The sun/moon button switches dark/light mode, and the palette button next to it cycles through six extra color themes — one click per theme, wrapping back to the original at the end.</p>

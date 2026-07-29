@@ -199,6 +199,40 @@ class DownloadRequest(BaseModel):
         return v
 
 
+class DiscographyRequest(BaseModel):
+    url: str
+
+    @validator("url")
+    def url_length(cls, v):
+        if len(v) > settings.MAX_URL_LENGTH:
+            raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
+        return v
+
+
+class DiscographyAlbum(BaseModel):
+    url: str
+    title: str = ""
+
+    @validator("url")
+    def url_length(cls, v):
+        if len(v) > settings.MAX_URL_LENGTH:
+            raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
+        return v
+
+    @validator("title")
+    def title_length(cls, v):
+        return (v or "")[:300]
+
+
+class DiscographyDownloadRequest(DownloadRequest):
+    """Same options as a normal download, applied to every selected album.
+
+    `url` stays the album the user validated — it identifies the artist and is
+    the fallback when the client sends no explicit album selection.
+    """
+    albums: List[DiscographyAlbum] = []
+
+
 class BackupRequest(BaseModel):
     selection: str = "all"
     date_from: Optional[str] = None
@@ -387,6 +421,139 @@ async def start_download(req: DownloadRequest, request: Request):
         'title': meta.get('title', ''),
         'artist': meta.get('artist', ''),
     }
+
+
+@app.post("/api/discography")
+async def discography(req: DiscographyRequest, request: Request):
+    """Every album by the artist behind this URL, for the album picker."""
+    ip = _get_client_ip(request)
+    if not _rate_check(ip, limit=_RL_LIMIT, window=_RL_WINDOW):
+        raise HTTPException(429, "Too many requests — please wait before trying again")
+
+    is_valid, platform, error = validate_url(req.url, max_length=settings.MAX_URL_LENGTH)
+    if not is_valid:
+        raise HTTPException(400, error)
+
+    # Normally already cached by /api/validate. YouTube needs it for the
+    # channel URL; the other platforms derive the artist page from the URL.
+    meta = await extract_metadata(req.url)
+    if 'error' in meta:
+        meta = {}
+
+    from backend.discography import resolve_discography
+    result = await resolve_discography(req.url, meta)
+    result['platform'] = platform
+    if not result.get('artist'):
+        result['artist'] = meta.get('artist', '')
+    return result
+
+
+@app.post("/api/discography/download", dependencies=[Depends(require_token)])
+async def start_discography_download(req: DiscographyDownloadRequest, request: Request):
+    """Queue one download per album, each landing in its own folder.
+
+    Albums are queued with placeholder metadata and resolved individually by
+    the queue — extracting every tracklist here would take minutes for a large
+    discography. The response therefore returns immediately with one
+    download_id per album.
+    """
+    ip = _get_client_ip(request)
+    if not _rate_check(ip, limit=_RL_LIMIT, window=_RL_WINDOW):
+        raise HTTPException(429, "Too many requests — please wait before trying again")
+
+    from backend.discography import resolve_discography
+
+    base_meta = await extract_metadata(req.url)
+    if 'error' in base_meta:
+        base_meta = {}
+
+    albums = [{'url': a.url, 'title': a.title} for a in req.albums]
+    if not albums:
+        # No explicit selection — take the artist's whole discography.
+        albums = (await resolve_discography(req.url, base_meta)).get('albums', [])
+
+    if not albums:
+        raise HTTPException(422, "No albums found for this artist")
+
+    if len(albums) > settings.MAX_DISCOGRAPHY_ALBUMS:
+        raise HTTPException(
+            400,
+            f"Too many albums selected (max {settings.MAX_DISCOGRAPHY_ALBUMS})"
+        )
+
+    cover_settings_dict = req.cover_settings.dict() if req.cover_settings else None
+    artist = base_meta.get('artist', '')
+
+    queued, skipped = [], []
+    seen = set()
+    for album in albums:
+        album_url = (album.get('url') or '').strip()
+        if not album_url or album_url in seen:
+            continue
+        seen.add(album_url)
+
+        is_valid, platform, error = validate_url(album_url, max_length=settings.MAX_URL_LENGTH)
+        if not is_valid:
+            skipped.append({'url': album_url, 'reason': error})
+            continue
+
+        title = (album.get('title') or '').strip() or album_url
+        download_id = await enqueue_download({
+            'url': album_url,
+            'download_type': req.download_type,
+            'format': req.format,
+            'bitrate': req.bitrate,
+            'concatenate': req.concatenate,
+            'crossfade': req.crossfade,
+            'crossfade_duration': req.crossfade_duration,
+            'cover_settings': cover_settings_dict,
+            # A single uploaded cover can't stand in for a whole discography —
+            # each album keeps its own artwork.
+            'cover_id': None,
+            'include_description': req.include_description,
+            'source': 'discography',
+            'metadata': {
+                'is_playlist': True,
+                'platform': platform,
+                'title': title,
+                'album': title,
+                'artist': artist,
+                'track_count': 0,
+                'url': album_url,
+                # Tells the queue to extract the real tracklist before starting.
+                'needs_resolve': True,
+            },
+        })
+        queued.append({'download_id': download_id, 'title': title, 'url': album_url})
+
+    if not queued:
+        raise HTTPException(422, "None of the selected albums could be queued")
+
+    app_logger.info(f"Discography queued: {len(queued)} album(s) for {artist or req.url}")
+    return {'artist': artist, 'queued': queued, 'skipped': skipped}
+
+
+@app.get("/api/downloads/status")
+async def downloads_status(ids: str = Query(..., max_length=4096)):
+    """Status for many downloads in one request.
+
+    A discography batch queues one download per album, and browsers only allow
+    ~6 concurrent connections per host — opening an SSE stream per album would
+    stall every other request the page makes. Batches poll this instead.
+    Unknown ids are simply absent from the response.
+    """
+    wanted = [i.strip() for i in ids.split(',') if i.strip()]
+    if len(wanted) > settings.MAX_DISCOGRAPHY_ALBUMS:
+        raise HTTPException(400, "Too many ids requested")
+
+    result = {}
+    for download_id in wanted:
+        if not is_valid_uuid(download_id):
+            continue
+        state = get_download_status(download_id)
+        if state:
+            result[download_id] = state
+    return result
 
 
 @app.get("/api/download/{download_id}/status")

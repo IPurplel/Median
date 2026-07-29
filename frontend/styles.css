@@ -706,6 +706,56 @@ body {
 .toggle-text strong { color: var(--text); display: block; margin-bottom: 2px; }
 .toggle-text span { color: var(--text-2); font-size: 12px; }
 
+/* ── DISCOGRAPHY PICKER ──────────────────────────────────────────────────── */
+.disco-panel { margin-top: 12px; }
+
+.disco-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.disco-status { font-size: 12px; color: var(--text-2); }
+
+.disco-selectall {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.disco-selectall:hover { color: var(--text); border-color: var(--accent); }
+
+.disco-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-2);
+}
+
+.disco-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.disco-item:last-child { border-bottom: none; }
+.disco-item:hover { background: var(--bg-3); }
+
+.disco-check { accent-color: var(--accent); cursor: pointer; flex: none; }
+.disco-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.disco-count { color: var(--text-3); font-size: 11px; flex: none; }
+
 /* ── COVER SETTINGS PANEL ────────────────────────────────────────────────── */
 .cover-settings-panel {
   border: 1px solid var(--border);

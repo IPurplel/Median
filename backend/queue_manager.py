@@ -163,6 +163,68 @@ def update_download_status(
         })
 
 
+def update_download_metadata(download_id: str, metadata: dict):
+    """Rewrite a queued row's descriptive columns once real metadata arrives.
+
+    Discography albums are queued from a listing page that only reports a URL
+    and (sometimes) a title, so the row starts out with placeholders.
+    """
+    db = get_db()
+    try:
+        db.execute("""
+            UPDATE downloads SET
+                title = ?, artist = ?, album = ?, duration = ?,
+                thumbnail_url = ?, is_playlist = ?, playlist_count = ?,
+                tags = ?, release_date = ?, artist_url = ?
+            WHERE id = ?
+        """, (
+            metadata.get('title', ''),
+            metadata.get('artist', ''),
+            metadata.get('album', ''),
+            metadata.get('duration') or metadata.get('total_duration', 0),
+            metadata.get('thumbnail', ''),
+            1 if metadata.get('is_playlist') else 0,
+            metadata.get('track_count', 0),
+            json.dumps(metadata.get('tags') or []),
+            metadata.get('release_date', '') or '',
+            metadata.get('artist_url', '') or '',
+            download_id,
+        ))
+        db.commit()
+    except Exception as e:
+        app_logger.error(f"Metadata refresh error [{download_id[:8]}]: {e}")
+    finally:
+        db.close()
+
+
+async def _resolve_pending_metadata(download_id: str, url: str, placeholder: dict) -> dict:
+    """Extract the real metadata for an album queued from a discography listing.
+
+    Runs here rather than at enqueue time: extracting every album's tracklist
+    inside the HTTP request would take minutes for a large discography and time
+    the request out. Being inside the download semaphore also means the
+    extractions are throttled the same way downloads are.
+    """
+    fresh = await extract_metadata(url)
+    if not fresh or 'error' in fresh:
+        raise RuntimeError(
+            f"Could not read album metadata: {(fresh or {}).get('error', 'no metadata found')}"
+        )
+
+    fresh = dict(fresh)
+    fresh['platform'] = placeholder.get('platform') or fresh.get('platform', '')
+    # The listing page knows the artist even when a single album page doesn't.
+    if not (fresh.get('artist') or '').strip():
+        fresh['artist'] = placeholder.get('artist', '')
+
+    update_download_metadata(download_id, fresh)
+    app_logger.info(
+        f"Resolved album metadata [{download_id[:8]}]: "
+        f"{fresh.get('title')} ({fresh.get('track_count', 0)} tracks)"
+    )
+    return fresh
+
+
 async def process_download(download_id: str, download_params: dict):
     async with _get_semaphore():
         url = download_params['url']
@@ -220,6 +282,18 @@ async def process_download(download_id: str, download_params: dict):
 
         try:
             update_download_status(download_id, 'downloading', progress=0)
+
+            if metadata.get('needs_resolve'):
+                download_states[download_id]['message'] = 'Reading album details...'
+                metadata = await _resolve_pending_metadata(download_id, url, metadata)
+                download_params['metadata'] = metadata
+                download_states[download_id].update({
+                    'title': metadata.get('title', ''),
+                    'artist': metadata.get('artist', ''),
+                    'total_tracks': metadata.get('track_count', 0),
+                    'is_playlist': bool(metadata.get('is_playlist')),
+                    'message': '',
+                })
 
             is_playlist = metadata.get('is_playlist', False)
 

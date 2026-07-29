@@ -15,6 +15,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🖼️ **Cover + Audio** | Album art looped as the video stream alongside the audio · MP4 / MKV / WebM · single tracks or full albums |
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers · track order and chapters always match the album |
+| 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` |
 | 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
 | 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, lyrics, source link, release date, hashtag tags, and artist credits |
 | 📝 **Lyrics** | Bandcamp lyrics fetched automatically and embedded in the media tags (ID3 USLT / ©lyr / Vorbis) per track — combined into one tag for merged albums — plus included in `description.md` |
@@ -79,6 +80,7 @@ All options live in `.env`. None are required — the defaults are production-re
 | `DATABASE_PATH` | `/app/database/median.db` | SQLite database path |
 | `CLEANUP_INTERVAL` | `15` | Minutes until completed downloads are auto-deleted |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
+| `MAX_DISCOGRAPHY_ALBUMS` | `100` | Maximum albums a single discography download may queue |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
 | `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
 | `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |
@@ -129,6 +131,17 @@ Artist Name - Album Name/
 
 Merged playlists produce a single file: `Artist Name - Album Name.mp3`
 
+A whole-discography download queues each album separately, so they stay organized side by side:
+
+```
+Artist Name - First Album/
+  01 - Track One.mp3
+  ...
+Artist Name - Second Album/
+  01 - Track One.mp3
+  ...
+```
+
 ---
 
 ## 🐳 Docker Details
@@ -162,7 +175,10 @@ The full API is served at `/api/`. Key endpoints:
 | `GET` | `/api/platforms` | Platform reachability check |
 | `POST` | `/api/validate` | Validate a URL and fetch metadata |
 | `POST` | `/api/download` | Queue a download |
+| `POST` | `/api/discography` | List every album by the artist behind a URL |
+| `POST` | `/api/discography/download` | Queue one download per album, each in its own folder |
 | `GET` | `/api/download/{id}/status` | Poll download status |
+| `GET` | `/api/downloads/status?ids=` | Poll many downloads in one request (used by discography batches) |
 | `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |
 | `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
 | `DELETE` | `/api/download/{id}` | Cancel a download |
