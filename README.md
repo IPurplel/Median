@@ -194,7 +194,7 @@ The full API is served at `/api/`. Key endpoints:
 | `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |
 | `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
 | `DELETE` | `/api/download/{id}` | Cancel a download |
-| `GET` | `/api/download/{id}/file` | Download the completed file as a ZIP |
+| `GET` | `/api/download/{id}/file` | Download the finished result — plain audio for a single file, ZIP when there's more than one |
 | `GET` | `/api/download/{id}/chapters` | Chapter list of a merged file with YouTube-ready timestamps |
 | `GET` | `/api/download/{id}/description.md` | Markdown description (tracklist, source, tags, credits) |
 | `GET` | `/api/queue` | Active and queued downloads |

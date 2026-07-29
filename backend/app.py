@@ -1152,14 +1152,25 @@ async def get_file(download_id: str):
     album  = sanitize_filename(row['album']  or row['title'] or '') or 'Album'
     is_playlist = bool(row['is_playlist'])
 
+    include_description = bool(
+        row['include_description'] if 'include_description' in row.keys() else 0
+    )
+
+    # A lone file with nothing to bundle beside it doesn't need an archive.
+    # Zipping it just forces an extract step before the track will play. An
+    # album kept as separate tracks is a directory (browsers can't download
+    # one), and description.md makes a second file — those still need the zip.
+    if file_path.is_file() and not include_description:
+        stem = album if is_playlist else title
+        return FileResponse(
+            str(file_path),
+            filename=f"{artist} - {stem}{file_path.suffix}",
+        )
+
     zip_name = f"{artist} - {album}.zip" if is_playlist else f"{artist} - {title}.zip"
 
     tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
     tmp.close()
-
-    include_description = bool(
-        row['include_description'] if 'include_description' in row.keys() else 0
-    )
 
     def build_zip():
         try:

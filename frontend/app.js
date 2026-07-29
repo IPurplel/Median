@@ -1055,30 +1055,25 @@ async function toggleTracks(id) {
 
 // Bug #13 fix: use fetch so 404/410 errors show a toast, not a blank error page
 async function downloadFile(id) {
+  // Check the file is still there first, so a cleaned-up download gives a
+  // toast rather than dumping a JSON error into the tab.
   try {
-    const res = await fetch(`/api/download/${id}/file`);
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      toast(data.detail || `Download error (${res.status})`, 'error');
+    const s = await api('GET', `/api/download/${id}/status`);
+    if (['cleaned', 'error', 'cancelled'].includes(s.status)) {
+      toast('That file is no longer on the server — download it again', 'error');
       return;
     }
-    // Extract filename from Content-Disposition header
-    const cd = res.headers.get('Content-Disposition') || '';
-    const match = cd.match(/filename="?([^"]+)"?/);
-    const filename = match ? match[1] : `median_download_${id}.zip`;
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   } catch (err) {
     toast('Download failed: ' + err.message, 'error');
+    return;
   }
+
+  // Straight navigation rather than fetch + blob: a merged album can be
+  // hundreds of megabytes, and a blob holds the whole thing in tab memory
+  // before writing it. The browser streams it to disk instead, and names it
+  // from Content-Disposition — which is now a plain .mp3 for single files and
+  // a .zip only when there's genuinely more than one file to carry.
+  window.location.href = `/api/download/${id}/file`;
 }
 
 async function keepFile(id, keep) {
