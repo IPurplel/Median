@@ -79,7 +79,7 @@ All options live in `.env`. None are required — the defaults are production-re
 | `UPLOAD_FOLDER` | `/app/downloads` | Where downloaded files are stored |
 | `BACKUP_FOLDER` | `/app/backups` | Where backup ZIPs are stored |
 | `DATABASE_PATH` | `/app/database/median.db` | SQLite database path |
-| `CLEANUP_INTERVAL` | `15` | Minutes until completed downloads are auto-deleted |
+| `CLEANUP_INTERVAL` | `90` | Minutes until completed downloads are auto-deleted. Doubles as the sweep interval, so real retention is 90–180 min |
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
 | `MAX_DISCOGRAPHY_ALBUMS` | `100` | Maximum albums a single discography download may queue |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |

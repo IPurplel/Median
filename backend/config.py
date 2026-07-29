@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     MAX_DISCOGRAPHY_ALBUMS: int = 100
     CORS_ORIGINS: str = "*"
 
-    CLEANUP_INTERVAL: int = 15
+    # Does double duty: how often the cleanup job runs AND how old a completed
+    # download must be to be swept. Real retention therefore lands between one
+    # and two times this value. Long enough that a multi-album batch finishes
+    # before its first album expires.
+    CLEANUP_INTERVAL: int = 90
     AUTO_UPDATE_INTERVAL: int = 48
     DOWNLOAD_CHUNK_SIZE: int = 5
     LOG_BACKUP_COUNT: int = 7
