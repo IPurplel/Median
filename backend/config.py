@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     # its LAST album finished — never from when it was queued, which would drop
     # the hold mid-run and reintroduce the very problem it prevents.
     BATCH_HOLD_HOURS: int = 3
+
+    # Synced lyrics from lrclib.net, written as .lrc sidecars so players can
+    # scroll them. Bandcamp gives lyric text but no timings, so this is the
+    # only source of them. Purely additive — a miss or an outage leaves the
+    # existing static lyrics untouched.
+    LRCLIB_ENABLED: bool = True
+    LRCLIB_TIMEOUT: int = 10
     CORS_ORIGINS: str = "*"
 
     # Does double duty: how often the cleanup job runs AND how old a completed

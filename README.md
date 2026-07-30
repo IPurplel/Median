@@ -20,6 +20,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
 | 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, lyrics, source link, release date, hashtag tags, and artist credits |
 | 📝 **Lyrics** | Bandcamp lyrics fetched automatically and embedded in the media tags (ID3 USLT / ©lyr / Vorbis) per track — combined into one tag for merged albums — plus included in `description.md` |
+| ⏱️ **Synced Lyrics** | Time-synced lyrics looked up on [LRCLIB](https://lrclib.net) and saved as `.lrc` sidecars, so players like AIMP scroll them in time with the music · works for any platform, since matching is by artist/title/duration · no match simply leaves the static lyrics in place |
 | 🎨 **Custom Covers** | Upload your own image · 1:1, 4:3, 16:9, 9:16, Original ratio · 480p / 720p / 1080p / Original resolution |
 | 📋 **History** | Every download logged with size and format · re-download button while the file is still on the server |
 | 🌈 **Themes** | Dark / light toggle plus six extra color themes cycled with one button |
@@ -83,6 +84,8 @@ All options live in `.env`. None are required — the defaults are production-re
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
 | `MAX_DISCOGRAPHY_ALBUMS` | `100` | Maximum albums a single discography download may queue |
 | `BATCH_HOLD_HOURS` | `3` | Hours a finished discography batch is kept from auto-cleanup while waiting to be collected |
+| `LRCLIB_ENABLED` | `true` | Look up time-synced lyrics on lrclib.net and save them as `.lrc` sidecars |
+| `LRCLIB_TIMEOUT` | `10` | Seconds to wait on an LRCLIB lookup before giving up |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
 | `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
 | `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |

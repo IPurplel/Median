@@ -376,6 +376,23 @@ async def process_download(download_id: str, download_params: dict):
                 except Exception as e:
                     app_logger.warning(f"Lyrics tag embed failed (non-fatal): {e}")
 
+            # Bandcamp gives lyric text but no timings, so the embedded lyrics
+            # above can only ever be a static block. LRCLIB may have the same
+            # song with per-line timestamps — write those as .lrc sidecars so
+            # players scroll along. A miss leaves the static text as-is.
+            if settings.LRCLIB_ENABLED and result.get('file_path'):
+                try:
+                    from backend.utils.lrclib import attach_synced_lyrics
+                    loop = asyncio.get_running_loop()
+                    synced = await loop.run_in_executor(
+                        None, attach_synced_lyrics,
+                        result['file_path'], metadata, bool(concatenate),
+                    )
+                    if synced:
+                        app_logger.info(f"Synced lyrics written for {synced} track(s)")
+                except Exception as e:
+                    app_logger.warning(f"Synced lyrics lookup failed (non-fatal): {e}")
+
             update_download_status(
                 download_id, 'completed',
                 progress=100,

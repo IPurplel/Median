@@ -1198,11 +1198,16 @@ async def get_file(download_id: str):
         row['include_description'] if 'include_description' in row.keys() else 0
     )
 
+    # A synced-lyrics sidecar has to travel with its track, so it counts as a
+    # second file for the purposes of the rule below.
+    lrc = file_path.with_suffix('.lrc') if file_path.is_file() else None
+    has_lrc = bool(lrc and lrc.exists())
+
     # A lone file with nothing to bundle beside it doesn't need an archive.
     # Zipping it just forces an extract step before the track will play. An
     # album kept as separate tracks is a directory (browsers can't download
     # one), and description.md makes a second file — those still need the zip.
-    if file_path.is_file() and not include_description:
+    if file_path.is_file() and not include_description and not has_lrc:
         stem = album if is_playlist else title
         return FileResponse(
             str(file_path),
@@ -1224,6 +1229,9 @@ async def get_file(download_id: str):
                     else:
                         inner = f"{_title_only(title)}{inner_ext}"
                     zf.write(str(file_path), inner)
+                    # Sidecar lyrics must keep the track's stem to be found
+                    if has_lrc:
+                        zf.write(str(lrc), str(Path(inner).with_suffix('.lrc')))
 
                 elif file_path.is_dir():
                     files = sorted(
