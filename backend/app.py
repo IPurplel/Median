@@ -627,12 +627,13 @@ async def discography_batches():
                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
                    SUM(CASE WHEN status IN ('queued','downloading') THEN 1 ELSE 0 END) AS running,
                    SUM(CASE WHEN keep_file = 1 THEN 1 ELSE 0 END) AS held,
+                   SUM(CASE WHEN collected_at IS NOT NULL THEN 1 ELSE 0 END) AS collected,
                    SUM(COALESCE(file_size, 0)) AS total_size,
                    MAX(COALESCE(completed_at, created_at)) AS last_activity
             FROM downloads
             WHERE batch_id IS NOT NULL
             GROUP BY batch_id
-            HAVING running > 0 OR held > 0
+            HAVING (running > 0 OR held > 0) AND collected = 0
             ORDER BY last_activity DESC
             LIMIT 10
         """).fetchall()
@@ -848,9 +849,9 @@ async def get_batch_file(batch_id: str):
         if out:
             yield out
 
-        # The albums were held back from auto-cleanup until now; let the normal
-        # retention window take over again.
-        await loop.run_in_executor(None, _release_batch_keep, batch_id)
+        # Only reached once the whole archive has been written to the client —
+        # a cancelled download leaves the batch untouched and collectable.
+        await loop.run_in_executor(None, _mark_batch_collected, batch_id)
 
     app_logger.info(
         f"Streaming batch zip [{batch_id[:8]}]: {len(included)} album(s), "
@@ -863,15 +864,26 @@ async def get_batch_file(batch_id: str):
     )
 
 
-def _release_batch_keep(batch_id: str):
+def _mark_batch_collected(batch_id: str):
+    """Stamp a batch as collected so the short-timer sweep can reclaim it.
+
+    The keep flag deliberately stays set: it hands the batch to the dedicated
+    collected-batch job rather than the normal retention sweep, so the delay is
+    the configured few minutes instead of whenever the next hourly pass lands.
+    """
     db = get_db()
     try:
         db.execute(
-            "UPDATE downloads SET keep_file = 0 WHERE batch_id = ?", (batch_id,)
+            "UPDATE downloads SET collected_at = datetime('now') WHERE batch_id = ?",
+            (batch_id,)
         )
         db.commit()
+        app_logger.info(
+            f"Batch {batch_id[:8]} collected — files removed in "
+            f"{settings.BATCH_DELETE_MINUTES} min"
+        )
     except Exception as e:
-        app_logger.warning(f"Could not release keep flag for batch {batch_id}: {e}")
+        app_logger.warning(f"Could not mark batch {batch_id} collected: {e}")
     finally:
         db.close()
 

@@ -158,14 +158,14 @@ def test_no_missing_note_when_everything_succeeded(client, batch_env):
     assert not any('MISSING' in n for n in names)
 
 
-def test_fetching_the_zip_releases_the_keep_flag(client, batch_env):
+def test_fetching_the_zip_stamps_the_batch_as_collected(client, batch_env):
     from backend import db_models
 
     db = db_models.get_db()
     try:
         assert db.execute(
-            "SELECT COUNT(*) c FROM downloads WHERE batch_id=? AND keep_file=1",
-            (BATCH,)).fetchone()['c'] == 3
+            "SELECT COUNT(*) c FROM downloads WHERE batch_id=? AND collected_at IS NOT NULL",
+            (BATCH,)).fetchone()['c'] == 0
     finally:
         db.close()
 
@@ -173,10 +173,13 @@ def test_fetching_the_zip_releases_the_keep_flag(client, batch_env):
 
     db = db_models.get_db()
     try:
-        # Held only until collected — then normal retention applies again
-        assert db.execute(
-            "SELECT COUNT(*) c FROM downloads WHERE batch_id=? AND keep_file=1",
-            (BATCH,)).fetchone()['c'] == 0
+        row = db.execute(
+            "SELECT COUNT(*) c, SUM(keep_file) k FROM downloads "
+            "WHERE batch_id=? AND collected_at IS NOT NULL", (BATCH,)).fetchone()
+        # Every album is stamped, and the keep flag deliberately stays set so
+        # the short-timer sweep owns them rather than the normal retention job.
+        assert row['c'] == 3
+        assert row['k'] == 3
     finally:
         db.close()
 

@@ -54,7 +54,8 @@ def init_db():
             artist_url TEXT,
             include_description INTEGER DEFAULT 0,
             lyrics TEXT,
-            batch_id TEXT
+            batch_id TEXT,
+            collected_at TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS queue (
@@ -151,6 +152,12 @@ def init_db():
         db.execute(
             "CREATE INDEX IF NOT EXISTS idx_downloads_batch ON downloads(batch_id)"
         )
+
+    # Migration: when a batch's combined zip was collected. Once the user has
+    # the archive the server copies are redundant, so these are swept on a
+    # short timer of their own rather than the normal retention window.
+    if 'collected_at' not in cols:
+        db.execute("ALTER TABLE downloads ADD COLUMN collected_at TIMESTAMP")
 
     # Migration: drop legacy watched_urls table
     db.execute("DROP TABLE IF EXISTS watched_urls")

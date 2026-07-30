@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # its LAST album finished — never from when it was queued, which would drop
     # the hold mid-run and reintroduce the very problem it prevents.
     BATCH_HOLD_HOURS: int = 3
+    # Once the combined zip has been collected the server's copies are
+    # redundant, so they go on a short timer instead of the normal retention
+    # window — a discography is several gigabytes worth reclaiming promptly.
+    BATCH_DELETE_MINUTES: int = 3
     CORS_ORIGINS: str = "*"
 
     # Does double duty: how often the cleanup job runs AND how old a completed
@@ -126,6 +130,8 @@ def validate_settings():
         errors.append("MAX_DISCOGRAPHY_ALBUMS must be positive")
     if settings.BATCH_HOLD_HOURS <= 0:
         errors.append("BATCH_HOLD_HOURS must be positive")
+    if settings.BATCH_DELETE_MINUTES <= 0:
+        errors.append("BATCH_DELETE_MINUTES must be positive")
     if errors:
         raise ValueError("Invalid configuration:\n" + "\n".join(f"  - {e}" for e in errors))
 

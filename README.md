@@ -83,6 +83,7 @@ All options live in `.env`. None are required — the defaults are production-re
 | `MAX_CONCURRENT_DOWNLOADS` | `3` | Maximum parallel downloads |
 | `MAX_DISCOGRAPHY_ALBUMS` | `100` | Maximum albums a single discography download may queue |
 | `BATCH_HOLD_HOURS` | `3` | Hours a finished discography batch is kept from auto-cleanup while waiting to be collected |
+| `BATCH_DELETE_MINUTES` | `3` | Minutes after the combined zip is downloaded before the server's album copies are deleted |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
 | `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
 | `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |

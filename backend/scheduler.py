@@ -72,6 +72,70 @@ async def cleanup_old_downloads():
         db.close()
 
 
+def _delete_download_path(raw: str) -> bool:
+    """Remove a download's file or folder. True if it is gone afterwards."""
+    if not raw:
+        return True
+    path = Path(raw)
+    try:
+        if path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(str(path), ignore_errors=True)
+        return not path.exists()
+    except OSError as e:
+        app_logger.error(f"Could not delete {raw}: {e}")
+        return False
+
+
+async def cleanup_collected_batches():
+    """Remove discography albums shortly after their combined zip was taken.
+
+    Once the user holds the archive the server's copies are redundant, and a
+    discography is several gigabytes — waiting out the normal retention window
+    means the disk stays full far longer than it needs to. The timer starts
+    when the zip finished transferring, not when the albums downloaded.
+    """
+    db = get_db()
+    try:
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=settings.BATCH_DELETE_MINUTES)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+
+        rows = db.execute("""
+            SELECT id, file_path, batch_id FROM downloads
+            WHERE collected_at IS NOT NULL
+              AND collected_at < ?
+              AND status != 'cleaned'
+        """, (cutoff,)).fetchall()
+
+        deleted, cleaned_ids, batches = 0, [], set()
+        for row in rows:
+            if _delete_download_path(row['file_path']):
+                cleaned_ids.append(row['id'])
+                batches.add(row['batch_id'])
+                if row['file_path']:
+                    deleted += 1
+
+        if cleaned_ids:
+            marks = ','.join('?' * len(cleaned_ids))
+            db.execute(
+                f"UPDATE downloads SET status = 'cleaned', keep_file = 0 "
+                f"WHERE id IN ({marks})",
+                cleaned_ids
+            )
+            db.commit()
+            app_logger.info(
+                f"Collected-batch cleanup: removed {deleted} album(s) "
+                f"across {len(batches)} batch(es)"
+            )
+    except Exception as e:
+        app_logger.error(f"Collected-batch cleanup error: {e}")
+    finally:
+        db.close()
+
+
 async def release_stale_batches():
     """Drop the cleanup exemption on discography batches nobody collected.
 
@@ -92,10 +156,13 @@ async def release_stale_batches():
             datetime.now(timezone.utc) - timedelta(hours=settings.BATCH_HOLD_HOURS)
         ).strftime('%Y-%m-%d %H:%M:%S')
 
+        # Collected batches are excluded — they belong to the short-timer sweep
+        # below, and letting both jobs act on them would make the delay depend
+        # on which ran first.
         candidates = db.execute("""
             SELECT batch_id, MAX(COALESCE(completed_at, created_at)) AS last_activity
             FROM downloads
-            WHERE batch_id IS NOT NULL AND keep_file = 1
+            WHERE batch_id IS NOT NULL AND keep_file = 1 AND collected_at IS NULL
             GROUP BY batch_id
             HAVING last_activity < ?
         """, (cutoff,)).fetchall()
@@ -288,6 +355,15 @@ def start_scheduler():
         release_stale_batches,
         IntervalTrigger(minutes=20),
         id='release_stale_batches',
+        replace_existing=True
+    )
+
+    # Runs every minute so "deleted a few minutes after collection" actually
+    # means that, rather than whenever the next slow sweep happens to land.
+    scheduler.add_job(
+        cleanup_collected_batches,
+        IntervalTrigger(minutes=1),
+        id='cleanup_collected_batches',
         replace_existing=True
     )
 
