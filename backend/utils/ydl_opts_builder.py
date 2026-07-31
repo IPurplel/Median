@@ -1,5 +1,6 @@
 from typing import Optional, Callable
 from backend.config import settings
+from backend.utils.validators import ORIGINAL_BITRATE
 
 
 FORMAT_EXT_MAP = {
@@ -35,11 +36,22 @@ def get_ydl_opts(
         opts['progress_hooks'] = [progress_hook]
 
     bitrate_val = (bitrate or '').replace('kbps', '').strip() if bitrate else ''
+    keep_original = bitrate_val.lower() == ORIGINAL_BITRATE
+    if keep_original:
+        bitrate_val = ''
 
     if download_type == 'audio':
         opts['format'] = 'bestaudio/best'
         opts['writethumbnail'] = True
-        if fmt == 'flac':
+        if keep_original:
+            # 'best' means "don't convert unless you have to": the audio stream
+            # is copied, never re-encoded, so a lossy source never goes through
+            # a second lossy generation. It still leaves the container, which
+            # matters — YouTube serves Opus inside WebM, and WebM can hold
+            # neither cover art nor tags. Extracting gives a plain .opus that
+            # can, without touching the audio itself.
+            postprocessors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'best'}]
+        elif fmt == 'flac':
             postprocessors = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'}]
         elif fmt == 'mp3':
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3'}

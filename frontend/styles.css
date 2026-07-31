@@ -516,6 +516,13 @@ body {
   color: var(--text-2);
 }
 
+.bitrate-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
 .tracks-head {
   display: flex;
   align-items: center;

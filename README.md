@@ -10,7 +10,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 
 | | |
 |---|---|
-| 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps |
+| 🎵 **Audio** | MP3, FLAC, AAC · 128 / 192 / 256 / 320 kbps · or **Original**, which copies the source stream without re-encoding it (smaller files, no generation loss) |
 | 🎬 **Video** | MP4, MKV, WebM |
 | 🖼️ **Cover + Audio** | Album art looped as the video stream alongside the audio · MP4 / MKV / WebM · single tracks or full albums |
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |

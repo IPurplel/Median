@@ -71,13 +71,23 @@ def sanitize_filename(name: str) -> str:
     return sanitized[:200].strip('. ') or 'Unknown'
 
 
+ORIGINAL_BITRATE = 'original'
+
+
 def validate_bitrate(bitrate: str) -> str:
-    """Return the bitrate string if valid, raise ValueError otherwise."""
+    """Return the bitrate string if valid, raise ValueError otherwise.
+
+    'original' is a valid choice meaning "don't re-encode at all" — the source
+    stream is kept exactly as served.
+    """
     if not bitrate:
         return bitrate
-    if not re.fullmatch(r'\d{1,6}k?', bitrate.strip(), re.IGNORECASE):
+    value = bitrate.strip()
+    if value.lower() == ORIGINAL_BITRATE:
+        return ORIGINAL_BITRATE
+    if not re.fullmatch(r'\d{1,6}k?', value, re.IGNORECASE):
         raise ValueError(f"Invalid bitrate value: {bitrate!r}")
-    return bitrate.strip()
+    return value
 
 
 def validate_url(url: str, max_length: int = 2048) -> Tuple[bool, Optional[str], Optional[str]]:

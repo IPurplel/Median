@@ -76,6 +76,31 @@ def format_duration(seconds) -> str:
     return f"{m}:{s:02d}"
 
 
+MEDIA_EXTENSIONS = (
+    'mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav',
+    'webm', 'mp4', 'mkv',
+)
+
+
+def find_any_media_file(template_base: str) -> Optional[str]:
+    """The media file yt-dlp wrote for a temp stem, whatever its extension.
+
+    Needed when the source stream is kept as-is: without a conversion step the
+    output format isn't known until the download lands. Thumbnails and other
+    side files are ignored by extension.
+    """
+    parent = Path(template_base).parent
+    stem = Path(template_base).name
+    if not parent.exists():
+        return None
+
+    for f in sorted(parent.iterdir()):
+        if (f.is_file() and f.name.startswith(stem)
+                and f.suffix.lower().lstrip('.') in MEDIA_EXTENSIONS):
+            return str(f)
+    return None
+
+
 def find_downloaded_file(template_base: str, ext: str) -> Optional[str]:
     EXT_ALIASES = {
         'aac': ['aac', 'm4a'],

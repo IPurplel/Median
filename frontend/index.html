@@ -160,7 +160,8 @@
             <div class="format-group" id="bitrate-group">
               <label class="row-label">Bitrate</label>
               <select class="bitrate-select" id="bitrate-select">
-                <option value="320">320 kbps</option>
+                <option value="original">Original (no re-encode)</option>
+                <option value="320" selected>320 kbps</option>
                 <option value="256">256 kbps</option>
                 <option value="192">192 kbps</option>
                 <option value="128">128 kbps</option>
@@ -386,6 +387,7 @@
           <div class="step-content">
             <strong>Choose your format</strong>
             <p>Pick <em>Audio Only</em> (MP3 / FLAC / AAC), <em>Video Only</em> (MP4 / MKV / WebM), or <em>Cover + Audio</em> for SoundCloud/Bandcamp tracks with artwork embedded as video. In Cover + Audio you can upload your own cover image and choose its aspect ratio, resolution, and output format.</p>
+            <p>The bitrate list has an <strong>Original (no re-encode)</strong> option. Every one of these sites streams already-compressed audio, so converting it again can only lose a little and make the file bigger — picking a number higher than the source gains you nothing. <em>Original</em> copies the audio across untouched and saves it in whatever format it already was, usually <code>.mp3</code> from Bandcamp or <code>.opus</code> from YouTube. On YouTube that's typically a 4&nbsp;MB file instead of a 10&nbsp;MB one, at better quality. Tags and cover art are still written. Use a fixed bitrate when you specifically need everything to be MP3 — for the merged albums you upload, say.</p>
           </div>
         </div>
         <div class="help-step">

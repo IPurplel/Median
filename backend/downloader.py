@@ -9,8 +9,9 @@ from backend.utils.validators import detect_platform, is_playlist_url
 from backend.utils.file_organizer import (
     get_single_track_filename, get_album_filename,
     get_playlist_folder,
-    ensure_unique_path, find_downloaded_file
+    ensure_unique_path, find_downloaded_file, find_any_media_file
 )
+from backend.utils.validators import ORIGINAL_BITRATE
 from backend.concatenation_engine import (
     concatenate_audio, concatenate_video, create_cover_audio_video,
     attach_cover_to_mkv,
@@ -19,6 +20,18 @@ from backend.image_processor import download_cover_image
 from backend.logger import app_logger
 from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP
 from backend.utils.tag_writer import write_tags
+
+
+def _keeps_original(download_type: str, bitrate: str) -> bool:
+    """True when the source stream is saved untouched rather than re-encoded.
+
+    Only meaningful for plain audio downloads — cover+audio has to produce a
+    video stream, so it always converts.
+    """
+    return (
+        download_type == 'audio'
+        and (bitrate or '').strip().lower() == ORIGINAL_BITRATE
+    )
 
 
 def _album_meta(metadata: dict, title: str, artist: str, album: str = '') -> dict:
@@ -211,7 +224,11 @@ async def download_single(
 
     audio_ext = 'mp3' if download_type == 'cover_audio' else ext
 
-    downloaded_file = find_downloaded_file(temp_template, audio_ext)
+    keep_original = _keeps_original(download_type, bitrate)
+    downloaded_file = (
+        find_any_media_file(temp_template) if keep_original
+        else find_downloaded_file(temp_template, audio_ext)
+    )
 
     if not downloaded_file:
         # Clean up any partial temp files before raising
@@ -309,6 +326,14 @@ async def download_single(
                 "Cover+audio merge failed. Check FFmpeg is installed and the audio/image are valid."
             )
     else:
+        # Without a conversion step the real extension is only known now, so
+        # the output name is settled here rather than up front.
+        if keep_original:
+            real_ext = Path(downloaded_file).suffix.lstrip('.') or ext
+            output_path = ensure_unique_path(
+                download_dir / get_single_track_filename(artist, title, real_ext)
+            )
+
         try:
             shutil.move(downloaded_file, str(output_path))
             final_path = str(output_path)
@@ -431,7 +456,11 @@ async def download_playlist(
                     app_logger.warning(f"Track {i+1} download raised: {e}")
 
                 dl_ext = 'mp3' if download_type == 'cover_audio' else ext
-                f = find_downloaded_file(temp_template, dl_ext)
+                f = (
+                    find_any_media_file(temp_template)
+                    if _keeps_original(download_type, bitrate)
+                    else find_downloaded_file(temp_template, dl_ext)
+                )
                 if f:
                     downloaded_files.append(f)
                     downloaded_tracks.append(track)
@@ -462,7 +491,16 @@ async def download_playlist(
             if progress_callback:
                 await progress_callback(75, "Concatenating...")
 
-            output_filename = get_album_filename(artist, album, ext)
+            merge_bitrate = bitrate
+            merge_ext = ext
+            if _keeps_original(download_type, bitrate):
+                # The tracks kept their own codec, so the merged file needs a
+                # container that can actually hold it — and the encoder must
+                # not be handed the literal word "original" as a bitrate.
+                merge_ext = Path(downloaded_files[0]).suffix.lstrip('.') or ext
+                merge_bitrate = ''
+
+            output_filename = get_album_filename(artist, album, merge_ext)
             output_path = ensure_unique_path(download_dir / output_filename)
 
             if download_type == 'audio':
@@ -470,7 +508,7 @@ async def download_playlist(
                     downloaded_files, str(output_path), downloaded_tracks,
                     add_chapters=True, progress_callback=progress_callback,
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
-                    bitrate=bitrate,
+                    bitrate=merge_bitrate,
                 )
             elif download_type == 'video':
                 ok = await concatenate_video(
@@ -710,7 +748,8 @@ async def download_playlist(
                             genre=metadata.get('genre', '') or '',
                         )
 
-        MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm', '.ogg'}
+        MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm',
+                      '.ogg', '.opus'}
         files = [
             f for f in album_folder.iterdir()
             if f.is_file() and f.suffix.lower() in MEDIA_EXTS

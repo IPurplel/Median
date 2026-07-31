@@ -513,6 +513,8 @@ function selectType(type) {
       p.classList.toggle('active', p.dataset.outfmt === currentCoverSettings.output_format);
     });
   }
+
+  syncBitrateOptions();
 }
 
 // ── FORMAT PILLS ──────────────────────────────────────────────────────────────
@@ -542,7 +544,43 @@ function selectFmt(fmt, group) {
 
 $('#bitrate-select').addEventListener('change', e => {
   currentBitrate = e.target.value;
+  syncBitrateHint();
 });
+
+// "Original" keeps the source stream instead of re-encoding it, so the file
+// arrives in whatever format the platform served — the format pills don't
+// apply. Say so rather than letting the mismatch surprise anyone.
+function syncBitrateHint() {
+  const grp = $('#bitrate-group');
+  if (!grp) return;
+  let hint = $('#bitrate-hint');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.id = 'bitrate-hint';
+    hint.className = 'bitrate-hint';
+    grp.appendChild(hint);
+  }
+  const on = currentBitrate === 'original';
+  hint.classList.toggle('hidden', !on);
+  hint.textContent = on
+    ? 'Saved exactly as the site serves it — no quality loss, and the file keeps its own format (often .mp3, sometimes .opus or .m4a).'
+    : '';
+}
+
+// Cover+Audio has to render a video stream, so it always converts — there is
+// no untouched source to keep.
+function syncBitrateOptions() {
+  const opt = $('#bitrate-select option[value="original"]');
+  if (!opt) return;
+  const allowed = currentDownloadType !== 'cover_audio';
+  opt.disabled = !allowed;
+  opt.hidden = !allowed;
+  if (!allowed && currentBitrate === 'original') {
+    currentBitrate = '320';
+    $('#bitrate-select').value = '320';
+  }
+  syncBitrateHint();
+}
 
 // ── COVER SETTINGS ────────────────────────────────────────────────────────────
 $$('.ratio-pill').forEach(pill => {
