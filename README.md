@@ -16,7 +16,9 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | 🏷️ **Tags & Cover Art** | Title, artist, album, year, genre, and cover embedded in every format that supports it (ID3 / Vorbis / MP4 atom / MKV attachment) · WebM can't embed art, so a sidecar cover + note is provided instead |
 | 📀 **Playlists** | Full album downloads · optional single-file merge with chapter markers · track order and chapters always match the album |
 | ☑️ **Pick Your Tracks** | Every track on an album is listed with a tick box — untick the songs you don't want and only the rest are downloaded · works for separate tracks and merged files alike · picked songs keep their original album track numbers |
-| 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` · grab the lot afterwards as one zip, a folder per album |
+| 🗂️ **Whole Discography** | Paste one album URL and queue every album by that artist · pick which ones from a checklist · each album lands in its own folder with its own cover, tags and `description.md` · grab the lot afterwards as one zip named after the band, a folder per album · albums that failed are listed inside the archive rather than quietly missing · a batch is remembered by the server, so refreshing the page or coming back hours later still gets you the zip |
+| 📥 **Sensible Delivery** | A single track, or an album merged into one file, downloads as plain playable audio — you only get a ZIP when there's genuinely more than one file to carry · large downloads stream to disk instead of being buffered in the browser, so they show real progress and can resume |
+| 🔁 **Resilient Downloads** | Transient failures (expired URLs, dropped connections, `HTTP 416` from a stale resume) are retried once automatically on a clean slate · failures that a retry can't fix are recognised and not re-attempted · half-written `.part` files are deleted when a download fails or is cancelled, and a scheduled sweep clears any stragglers |
 | 🎚️ **Crossfade** | Blend merged tracks into each other (0.5–12s, audio & video) · chapter times auto-corrected for the overlap · falls back to hard cuts with a visible note when not feasible |
 | 📑 **Chapters & Description** | Chapter table on finished merges with one-click *Copy for YouTube description* · optional `description.md` bundled in the zip: tracklist, lyrics, source link, release date, hashtag tags, and artist credits |
 | 📝 **Lyrics** | Bandcamp lyrics fetched automatically and embedded in the media tags (ID3 USLT / ©lyr / Vorbis) per track — combined into one tag for merged albums — plus included in `description.md` |
@@ -26,7 +28,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | ⚠️ **Transparent Fallbacks** | Skipped tracks, crossfade fallbacks, and format limits surface as notes under the download — never silent |
 | 📊 **Statistics** | Per-platform and per-artist download totals |
 | 💾 **Backups** | One-click backup and restore |
-| 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt · a **Clean now** button frees everything immediately when the disk fills up, leaving in-progress downloads alone |
+| 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt · discography batches are held until you collect the zip, then removed minutes later · a **Clean now** button frees everything immediately when the disk fills up, optionally including files Median has no record of, and always leaving in-progress downloads alone |
 | 🔄 **Auto-update** | yt-dlp updates itself on every startup |
 | 🔒 **Optional Auth** | Protect your instance with a bearer token |
 
@@ -189,6 +191,7 @@ The full API is served at `/api/`. Key endpoints:
 | `POST` | `/api/download` | Queue a download |
 | `POST` | `/api/discography` | List every album by the artist behind a URL |
 | `POST` | `/api/discography/download` | Queue one download per album, each in its own folder |
+| `GET` | `/api/discography/batches` | Batches still running or waiting to be collected |
 | `GET` | `/api/discography/batch/{id}` | Progress of one discography batch |
 | `GET` | `/api/discography/batch/{id}/file` | Every finished album of a batch as one streamed zip |
 | `GET` | `/api/download/{id}/status` | Poll download status |
