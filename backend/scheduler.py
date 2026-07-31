@@ -3,6 +3,7 @@ import subprocess
 import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from backend.config import settings
@@ -202,15 +203,25 @@ async def release_stale_batches():
 _STALE_PARTIAL_AGE = timedelta(hours=1)
 
 
-def _sweep_stale_partials() -> int:
-    """Walk the download folder and delete stale leftovers. Blocking."""
+def _sweep_stale_partials(max_age_seconds: Optional[float] = None) -> int:
+    """Walk the download folder and delete stale leftovers. Blocking.
+
+    The age threshold exists so an in-flight download's own .part files are
+    never pulled out from under it. Pass max_age_seconds=0 to ignore age
+    entirely — only safe when nothing is downloading, in which case every
+    temporary file is orphaned by definition.
+    """
     from backend.downloader import PARTIAL_SUFFIXES
 
     root = Path(settings.UPLOAD_FOLDER)
     if not root.exists():
         return 0
 
-    cutoff = datetime.now().timestamp() - _STALE_PARTIAL_AGE.total_seconds()
+    age = (
+        _STALE_PARTIAL_AGE.total_seconds()
+        if max_age_seconds is None else max_age_seconds
+    )
+    cutoff = datetime.now().timestamp() - age
     removed = 0
     try:
         for entry in root.iterdir():

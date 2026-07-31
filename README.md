@@ -26,7 +26,7 @@ Supports **YouTube**, **SoundCloud**, and **Bandcamp** — runs entirely on your
 | ⚠️ **Transparent Fallbacks** | Skipped tracks, crossfade fallbacks, and format limits surface as notes under the download — never silent |
 | 📊 **Statistics** | Per-platform and per-artist download totals |
 | 💾 **Backups** | One-click backup and restore |
-| 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt |
+| 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt · a **Clean now** button frees everything immediately when the disk fills up, leaving in-progress downloads alone |
 | 🔄 **Auto-update** | yt-dlp updates itself on every startup |
 | 🔒 **Optional Auth** | Protect your instance with a bearer token |
 
@@ -195,6 +195,8 @@ The full API is served at `/api/`. Key endpoints:
 | `GET` | `/api/downloads/status?ids=` | Poll many downloads in one request (used by discography batches) |
 | `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |
 | `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
+| `GET` | `/api/cleanup/preview` | How many files and how much space a manual cleanup would free |
+| `POST` | `/api/cleanup/now` | Delete every finished download immediately (skips anything still downloading) |
 | `DELETE` | `/api/download/{id}` | Cancel a download |
 | `GET` | `/api/download/{id}/file` | Download the finished result — plain audio for a single file, ZIP when there's more than one |
 | `GET` | `/api/download/{id}/chapters` | Chapter list of a merged file with YouTube-ready timestamps |

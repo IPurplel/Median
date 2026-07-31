@@ -1441,6 +1441,46 @@ async function checkPlatforms() {
 
 // ── HELP MODAL ────────────────────────────────────────────────────────────────
 $('#btn-help').addEventListener('click', () => $('#help-modal').classList.remove('hidden'));
+
+// ── CLEAN NOW ─────────────────────────────────────────────────────────────────
+// Escape hatch for a full disk: deletes every finished download immediately
+// instead of waiting out the retention window. Asks first, with real numbers,
+// because this destroys files the user may not have collected yet.
+$('#btn-cleanup')?.addEventListener('click', async () => {
+  const btn = $('#btn-cleanup');
+  if (btn.disabled) return;
+  btn.disabled = true;
+
+  try {
+    const p = await api('GET', '/api/cleanup/preview');
+    if (!p.items) {
+      toast('Nothing to clean — no finished downloads on the server', 'info');
+      return;
+    }
+
+    const activeNote = p.active_downloads
+      ? `\n\n${p.active_downloads} download(s) still running will be left alone.`
+      : '';
+    const ok = confirm(
+      `Delete ${p.items} finished download(s) from the server and free ${p.size}?` +
+      `\n\nAnything you haven't downloaded yet will be gone, including files ` +
+      `marked Keep and discography zips you haven't collected.${activeNote}`
+    );
+    if (!ok) return;
+
+    const r = await api('POST', '/api/cleanup/now');
+    toast(`Freed ${r.freed} — removed ${r.removed} download(s)`, 'success', 6000);
+
+    // Reflect the emptied server in whatever panels are open
+    if ($('#queue-body')?.classList.contains('open')) renderQueue();
+    if ($('#history-body')?.classList.contains('open')) initHistory();
+    if ($('#stats-body')?.classList.contains('open')) loadStats();
+  } catch (err) {
+    toast('Cleanup failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
 $('#modal-close').addEventListener('click', () => $('#help-modal').classList.add('hidden'));
 $('#help-modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) e.currentTarget.classList.add('hidden');

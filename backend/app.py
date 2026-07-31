@@ -609,6 +609,149 @@ def _batch_rows(batch_id: str) -> list:
     return rows
 
 
+def _within_upload_folder(path: Path) -> bool:
+    """Containment check that reports rather than raises — a bulk purge should
+    skip a suspect path, not abort over one bad row."""
+    try:
+        path.resolve().relative_to(Path(settings.UPLOAD_FOLDER).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _purgeable_rows(db) -> list:
+    """Finished downloads that still have files on disk.
+
+    Anything currently downloading is excluded: yt-dlp is mid-write, and
+    pulling the file out from under it corrupts the download instead of
+    freeing space.
+    """
+    from backend.queue_manager import active_downloads
+
+    rows = db.execute(
+        "SELECT id, file_path, file_size, title, album FROM downloads "
+        "WHERE file_path IS NOT NULL AND file_path != ''"
+    ).fetchall()
+
+    out = []
+    for row in rows:
+        if row['id'] in active_downloads:
+            continue
+        path = Path(row['file_path'])
+        if not _within_upload_folder(path) or not path.exists():
+            continue
+        out.append(row)
+    return out
+
+
+def _measure_cleanup() -> dict:
+    """What a purge would free, without touching anything."""
+    from backend.queue_manager import active_downloads
+
+    db = get_db()
+    try:
+        rows = _purgeable_rows(db)
+    finally:
+        db.close()
+
+    total = 0
+    for row in rows:
+        path = Path(row['file_path'])
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+            elif path.is_dir():
+                total += sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+        except OSError:
+            total += row['file_size'] or 0
+
+    return {
+        'items': len(rows),
+        'bytes': total,
+        'size': format_file_size(total),
+        'active_downloads': len(active_downloads),
+    }
+
+
+def _run_cleanup() -> dict:
+    """Delete every finished download's files right now. Blocking."""
+    from backend.queue_manager import active_downloads
+    from backend.scheduler import _delete_download_path, _sweep_stale_partials
+
+    db = get_db()
+    try:
+        rows = _purgeable_rows(db)
+        freed, removed, ids = 0, 0, []
+
+        for row in rows:
+            path = Path(row['file_path'])
+            try:
+                if path.is_file():
+                    size = path.stat().st_size
+                elif path.is_dir():
+                    size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+                else:
+                    size = 0
+            except OSError:
+                size = row['file_size'] or 0
+
+            if _delete_download_path(row['file_path']):
+                ids.append(row['id'])
+                freed += size
+                removed += 1
+
+        if ids:
+            marks = ','.join('?' * len(ids))
+            db.execute(
+                f"UPDATE downloads SET status = 'cleaned', keep_file = 0 "
+                f"WHERE id IN ({marks})",
+                ids
+            )
+            db.commit()
+    finally:
+        db.close()
+
+    # Sweep yt-dlp's leftovers too. With nothing running, everything temporary
+    # is orphaned by definition and can go regardless of age; otherwise fall
+    # back to the age-based sweep so an in-flight download keeps its .part.
+    partials = _sweep_stale_partials(max_age_seconds=0 if not active_downloads else None)
+
+    return {
+        'removed': removed,
+        'partials_removed': partials,
+        'freed_bytes': freed,
+        'freed': format_file_size(freed),
+        'skipped_active': len(active_downloads),
+    }
+
+
+@app.get("/api/cleanup/preview")
+async def cleanup_preview():
+    """How much a "clean now" would reclaim, so the UI can confirm with real
+    numbers instead of asking the user to delete something unspecified."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _measure_cleanup)
+
+
+@app.post("/api/cleanup/now", dependencies=[Depends(require_token)])
+async def cleanup_now(request: Request):
+    """Delete every finished download immediately, without waiting for the
+    retention window — for when the disk fills up before cleanup is due."""
+    # Namespaced bucket: the shared per-IP counter is spent by ordinary
+    # downloading, and a busy hour must not lock you out of freeing disk space.
+    ip = _get_client_ip(request)
+    if not _rate_check(f"cleanup:{ip}", limit=10, window=_RL_WINDOW):
+        raise HTTPException(429, "Too many requests — please wait before trying again")
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, _run_cleanup)
+    app_logger.info(
+        f"Manual cleanup: removed {result['removed']} download(s) and "
+        f"{result['partials_removed']} leftover(s), freed {result['freed']}"
+    )
+    return result
+
+
 @app.get("/api/discography/batches")
 async def discography_batches():
     """Discography batches still worth showing — running, or finished but not
