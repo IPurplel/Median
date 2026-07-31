@@ -196,7 +196,7 @@ The full API is served at `/api/`. Key endpoints:
 | `GET` | `/api/download/{id}/events` | Server-sent events stream for live progress |
 | `POST` | `/api/download/{id}/keep` | Mark a file to skip auto-cleanup |
 | `GET` | `/api/cleanup/preview` | How many files and how much space a manual cleanup would free |
-| `POST` | `/api/cleanup/now` | Delete every finished download immediately (skips anything still downloading) |
+| `POST` | `/api/cleanup/now` | Delete every finished download immediately (skips anything still downloading) · `?include_orphans=true` also removes files Median has no record of |
 | `DELETE` | `/api/download/{id}` | Cancel a download |
 | `GET` | `/api/download/{id}/file` | Download the finished result — plain audio for a single file, ZIP when there's more than one |
 | `GET` | `/api/download/{id}/chapters` | Chapter list of a merged file with YouTube-ready timestamps |

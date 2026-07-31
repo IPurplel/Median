@@ -644,6 +644,58 @@ def _purgeable_rows(db) -> list:
     return out
 
 
+def _path_size(path: Path, fallback: int = 0) -> int:
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        if path.is_dir():
+            return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+    except OSError:
+        pass
+    return fallback
+
+
+def _orphan_entries() -> list:
+    """Files in the download folder that no download record points at.
+
+    Leftovers from an older install, a database reset, or a delete that half
+    failed. Median has no record of them, so they are only ever removed on an
+    explicit opt-in — never as part of the ordinary sweep.
+    """
+    root = Path(settings.UPLOAD_FOLDER)
+    if not root.exists():
+        return []
+
+    known = set()
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT file_path FROM downloads "
+            "WHERE file_path IS NOT NULL AND file_path != ''"
+        ).fetchall()
+    finally:
+        db.close()
+
+    for row in rows:
+        try:
+            known.add(Path(row['file_path']).resolve())
+        except (OSError, ValueError):
+            pass
+
+    orphans = []
+    for entry in root.iterdir():
+        # Dot-entries are Median's own caches, not stray downloads
+        if entry.name.startswith('.'):
+            continue
+        try:
+            if entry.resolve() in known:
+                continue
+        except OSError:
+            continue
+        orphans.append(entry)
+    return orphans
+
+
 def _measure_cleanup() -> dict:
     """What a purge would free, without touching anything."""
     from backend.queue_manager import active_downloads
@@ -654,26 +706,24 @@ def _measure_cleanup() -> dict:
     finally:
         db.close()
 
-    total = 0
-    for row in rows:
-        path = Path(row['file_path'])
-        try:
-            if path.is_file():
-                total += path.stat().st_size
-            elif path.is_dir():
-                total += sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-        except OSError:
-            total += row['file_size'] or 0
+    total = sum(_path_size(Path(r['file_path']), r['file_size'] or 0) for r in rows)
+
+    orphans = _orphan_entries()
+    orphan_bytes = sum(_path_size(p) for p in orphans)
 
     return {
         'items': len(rows),
         'bytes': total,
         'size': format_file_size(total),
+        'orphans': len(orphans),
+        'orphan_bytes': orphan_bytes,
+        'orphan_size': format_file_size(orphan_bytes),
+        'orphan_names': sorted(p.name for p in orphans)[:10],
         'active_downloads': len(active_downloads),
     }
 
 
-def _run_cleanup() -> dict:
+def _run_cleanup(include_orphans: bool = False) -> dict:
     """Delete every finished download's files right now. Blocking."""
     from backend.queue_manager import active_downloads
     from backend.scheduler import _delete_download_path, _sweep_stale_partials
@@ -684,17 +734,7 @@ def _run_cleanup() -> dict:
         freed, removed, ids = 0, 0, []
 
         for row in rows:
-            path = Path(row['file_path'])
-            try:
-                if path.is_file():
-                    size = path.stat().st_size
-                elif path.is_dir():
-                    size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-                else:
-                    size = 0
-            except OSError:
-                size = row['file_size'] or 0
-
+            size = _path_size(Path(row['file_path']), row['file_size'] or 0)
             if _delete_download_path(row['file_path']):
                 ids.append(row['id'])
                 freed += size
@@ -711,6 +751,17 @@ def _run_cleanup() -> dict:
     finally:
         db.close()
 
+    # Unrecognised files, only on request. Skipped outright while anything is
+    # downloading: a download in flight has no file_path recorded until it
+    # finishes, so its half-written folder would look exactly like an orphan.
+    orphans_removed = 0
+    if include_orphans and not active_downloads:
+        for entry in _orphan_entries():
+            size = _path_size(entry)
+            if _delete_download_path(str(entry)):
+                orphans_removed += 1
+                freed += size
+
     # Sweep yt-dlp's leftovers too. With nothing running, everything temporary
     # is orphaned by definition and can go regardless of age; otherwise fall
     # back to the age-based sweep so an in-flight download keeps its .part.
@@ -718,6 +769,7 @@ def _run_cleanup() -> dict:
 
     return {
         'removed': removed,
+        'orphans_removed': orphans_removed,
         'partials_removed': partials,
         'freed_bytes': freed,
         'freed': format_file_size(freed),
@@ -734,9 +786,15 @@ async def cleanup_preview():
 
 
 @app.post("/api/cleanup/now", dependencies=[Depends(require_token)])
-async def cleanup_now(request: Request):
+async def cleanup_now(request: Request, include_orphans: bool = Query(False)):
     """Delete every finished download immediately, without waiting for the
-    retention window — for when the disk fills up before cleanup is due."""
+    retention window — for when the disk fills up before cleanup is due.
+
+    `include_orphans` additionally removes files in the download folder that
+    Median has no record of. Off by default: those are unrecognised, so
+    deleting them is the user's explicit call, and it is ignored entirely
+    while anything is still downloading.
+    """
     # Namespaced bucket: the shared per-IP counter is spent by ordinary
     # downloading, and a busy hour must not lock you out of freeing disk space.
     ip = _get_client_ip(request)
@@ -744,9 +802,10 @@ async def cleanup_now(request: Request):
         raise HTTPException(429, "Too many requests — please wait before trying again")
 
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _run_cleanup)
+    result = await loop.run_in_executor(None, _run_cleanup, include_orphans)
     app_logger.info(
-        f"Manual cleanup: removed {result['removed']} download(s) and "
+        f"Manual cleanup: removed {result['removed']} download(s), "
+        f"{result['orphans_removed']} unrecognised file(s) and "
         f"{result['partials_removed']} leftover(s), freed {result['freed']}"
     )
     return result

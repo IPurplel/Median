@@ -177,6 +177,70 @@ def test_fresh_partials_survive_while_a_download_runs(client, env, monkeypatch):
     assert part.exists()      # belongs to the download still in flight
 
 
+# ── unrecognised files ────────────────────────────────────────────────────────
+
+def test_orphans_are_reported_but_not_deleted_by_default(client, env):
+    stray = env['downloads'] / "left over from an old install.mp3"
+    stray.write_bytes(b"x" * 50)
+
+    p = client.get("/api/cleanup/preview").json()
+    assert p['orphans'] == 1
+    assert p['orphan_bytes'] == 50
+    assert p['orphan_names'] == ["left over from an old install.mp3"]
+
+    r = client.post("/api/cleanup/now").json()
+    assert r['orphans_removed'] == 0
+    assert stray.exists()          # never removed without an explicit opt-in
+
+
+def test_orphans_are_deleted_on_request(client, env):
+    stray = env['downloads'] / "stray.mp3"
+    stray.write_bytes(b"x" * 50)
+    strays = env['downloads'] / "old album"
+    strays.mkdir()
+    (strays / "track.mp3").write_bytes(b"x" * 70)
+
+    r = client.post("/api/cleanup/now?include_orphans=true").json()
+    assert r['orphans_removed'] == 2
+    assert r['freed_bytes'] == 120
+    assert not stray.exists() and not strays.exists()
+
+
+def test_tracked_files_are_not_counted_as_orphans(client, env):
+    _, tracked = env['add']("Tracked", size=10)
+    p = client.get("/api/cleanup/preview").json()
+    assert p['items'] == 1
+    assert p['orphans'] == 0
+    assert tracked.exists()
+
+
+def test_median_caches_are_left_alone(client, env):
+    cache = env['downloads'] / ".cover_cache"
+    cache.mkdir()
+    (cache / "thumb.jpg").write_bytes(b"img")
+
+    p = client.get("/api/cleanup/preview").json()
+    assert p['orphans'] == 0
+
+    client.post("/api/cleanup/now?include_orphans=true")
+    assert cache.exists()          # Median's own cache, not a stray download
+
+
+def test_orphans_are_skipped_while_a_download_runs(client, env, monkeypatch):
+    from backend import queue_manager
+
+    # An in-flight download has no file_path recorded yet, so its half-written
+    # folder is indistinguishable from a stray — don't guess, just skip.
+    monkeypatch.setattr(queue_manager, "active_downloads", {str(uuid.uuid4()): object()})
+    in_progress = env['downloads'] / "Artist - Album In Progress"
+    in_progress.mkdir()
+    (in_progress / "001.mp3.part").write_bytes(b"partial")
+
+    r = client.post("/api/cleanup/now?include_orphans=true").json()
+    assert r['orphans_removed'] == 0
+    assert in_progress.exists()
+
+
 def test_cleaning_twice_is_harmless(client, env):
     env['add']("One")
     first = client.post("/api/cleanup/now").json()

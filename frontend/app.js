@@ -1453,23 +1453,46 @@ $('#btn-cleanup')?.addEventListener('click', async () => {
 
   try {
     const p = await api('GET', '/api/cleanup/preview');
-    if (!p.items) {
-      toast('Nothing to clean — no finished downloads on the server', 'info');
+    if (!p.items && !p.orphans) {
+      toast('Nothing to clean — the download folder is already empty', 'info');
       return;
     }
 
     const activeNote = p.active_downloads
       ? `\n\n${p.active_downloads} download(s) still running will be left alone.`
       : '';
-    const ok = confirm(
-      `Delete ${p.items} finished download(s) from the server and free ${p.size}?` +
-      `\n\nAnything you haven't downloaded yet will be gone, including files ` +
-      `marked Keep and discography zips you haven't collected.${activeNote}`
-    );
-    if (!ok) return;
 
-    const r = await api('POST', '/api/cleanup/now');
-    toast(`Freed ${r.freed} — removed ${r.removed} download(s)`, 'success', 6000);
+    if (p.items) {
+      const ok = confirm(
+        `Delete ${p.items} finished download(s) from the server and free ${p.size}?` +
+        `\n\nAnything you haven't downloaded yet will be gone, including files ` +
+        `marked Keep and discography zips you haven't collected.${activeNote}`
+      );
+      if (!ok) return;
+    }
+
+    // Unrecognised files are asked about separately — Median has no record of
+    // them, so it can't tell the user what they are beyond the filename.
+    let includeOrphans = false;
+    if (p.orphans && !p.active_downloads) {
+      const names = p.orphan_names.map(n => `  • ${n}`).join('\n');
+      const more = p.orphans > p.orphan_names.length
+        ? `\n  …and ${p.orphans - p.orphan_names.length} more`
+        : '';
+      includeOrphans = confirm(
+        `Median also found ${p.orphans} file(s) in the download folder ` +
+        `it has no record of (${p.orphan_size}):\n\n${names}${more}\n\n` +
+        `These are usually leftovers from an older install or a reset. ` +
+        `Delete them too?`
+      );
+    }
+
+    const r = await api(
+      'POST', `/api/cleanup/now?include_orphans=${includeOrphans}`
+    );
+    const extra = r.orphans_removed
+      ? `, ${r.orphans_removed} unrecognised file(s)` : '';
+    toast(`Freed ${r.freed} — removed ${r.removed} download(s)${extra}`, 'success', 6000);
 
     // Reflect the emptied server in whatever panels are open
     if ($('#queue-body')?.classList.contains('open')) renderQueue();
