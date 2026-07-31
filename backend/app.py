@@ -992,8 +992,10 @@ async def get_batch_file(batch_id: str):
     ]
 
     from backend.utils.validators import sanitize_filename
+    # Just the band name — the folders inside already say what it is, so any
+    # extra wording only gets in the way when filing it away.
     artist = sanitize_filename(rows[0]['artist'] or '') or 'Discography'
-    zip_name = f"{artist} - Discography.zip"
+    zip_name = f"{artist}.zip"
 
     async def stream():
         loop = asyncio.get_running_loop()

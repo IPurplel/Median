@@ -125,7 +125,8 @@ def test_zip_gives_each_album_its_own_folder(client, batch_env):
     r = client.get(f"/api/discography/batch/{BATCH}/file")
     assert r.status_code == 200
     assert r.headers['content-type'] == 'application/zip'
-    assert 'The Artist - Discography.zip' in r.headers['content-disposition']
+    # Named after the band alone — the folders inside carry the album names
+    assert 'filename="The Artist.zip"' in r.headers['content-disposition']
 
     names = _open_zip(r).namelist()
     assert "First/Song One.mp3" in names
