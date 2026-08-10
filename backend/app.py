@@ -936,10 +936,16 @@ def _short_error(message: str) -> str:
     return text[:200].strip().rstrip(';')
 
 
-def _album_zip_entries(row) -> list:
-    """(source path, path inside the zip) for one album in the combined zip."""
+def _album_folder(row) -> str:
+    """The album's folder name inside the combined zip. Shared so the audio and
+    the description.md beside it can never disagree about where they belong."""
     from backend.utils.validators import sanitize_filename
 
+    return sanitize_filename(row['album'] or row['title'] or 'Album') or 'Album'
+
+
+def _album_zip_entries(row) -> list:
+    """(source path, path inside the zip) for one album in the combined zip."""
     raw = row['file_path']
     if not raw:
         return []
@@ -951,7 +957,7 @@ def _album_zip_entries(row) -> list:
     if not path.exists():
         return []
 
-    folder = sanitize_filename(row['album'] or row['title'] or 'Album') or 'Album'
+    folder = _album_folder(row)
     if path.is_file():
         # A merged album is a single file — still give it its own folder so
         # every album unzips the same way.
@@ -978,14 +984,18 @@ async def get_batch_file(batch_id: str):
     if not completed:
         raise HTTPException(404, "No completed albums in this batch yet")
 
-    entries, included = [], []
+    # Grouped by album rather than one flat list, so each folder's description.md
+    # can be written into it — a whole-discography download asks for the option
+    # once and expects it applied to every album, not just the ones fetched
+    # individually.
+    plan, included = [], []
     for row in completed:
         album_entries = _album_zip_entries(row)
         if album_entries:
-            entries.extend(album_entries)
+            plan.append((row, album_entries))
             included.append(row['album'] or row['title'] or 'Album')
 
-    if not entries:
+    if not plan:
         raise HTTPException(410, "Album files have been cleaned up — please download again.")
 
     missing = [
@@ -1007,37 +1017,79 @@ async def get_batch_file(batch_id: str):
         # for nothing — this is purely a container.
         zf = zipfile.ZipFile(sink, 'w', zipfile.ZIP_STORED)
         try:
-            for src, arcname in entries:
-                try:
-                    handle = open(str(src), 'rb')
-                except OSError as e:
-                    app_logger.warning(f"Batch zip skipped {src}: {e}")
-                    continue
-                try:
-                    # Carry the real file time across — zipfile otherwise
-                    # stamps every entry 1980-01-01, which looks broken once
-                    # extracted and confuses library "date added" sorting.
+            for row, album_entries in plan:
+                for src, arcname in album_entries:
                     try:
-                        stamp = time.localtime(src.stat().st_mtime)[:6]
-                    except OSError:
-                        stamp = time.localtime()[:6]
-                    info = zipfile.ZipInfo(arcname, date_time=stamp)
-                    info.compress_type = zipfile.ZIP_STORED
-                    with zf.open(info, 'w') as dest:
-                        while True:
-                            # File I/O in a worker thread — a multi-GB archive
-                            # would otherwise block the loop for the whole
-                            # transfer, stalling progress streams and the
-                            # container healthcheck.
-                            data = await loop.run_in_executor(None, handle.read, 65536)
-                            if not data:
-                                break
-                            await loop.run_in_executor(None, dest.write, data)
-                            out = sink.drain()
-                            if out:
-                                yield out
-                finally:
-                    handle.close()
+                        handle = open(str(src), 'rb')
+                    except OSError as e:
+                        app_logger.warning(f"Batch zip skipped {src}: {e}")
+                        continue
+                    try:
+                        # Carry the real file time across — zipfile otherwise
+                        # stamps every entry 1980-01-01, which looks broken once
+                        # extracted and confuses library "date added" sorting.
+                        try:
+                            stamp = time.localtime(src.stat().st_mtime)[:6]
+                        except OSError:
+                            stamp = time.localtime()[:6]
+                        info = zipfile.ZipInfo(arcname, date_time=stamp)
+                        info.compress_type = zipfile.ZIP_STORED
+                        with zf.open(info, 'w') as dest:
+                            while True:
+                                # File I/O in a worker thread — a multi-GB archive
+                                # would otherwise block the loop for the whole
+                                # transfer, stalling progress streams and the
+                                # container healthcheck.
+                                data = await loop.run_in_executor(None, handle.read, 65536)
+                                if not data:
+                                    break
+                                await loop.run_in_executor(None, dest.write, data)
+                                out = sink.drain()
+                                if out:
+                                    yield out
+                    finally:
+                        handle.close()
+                    out = sink.drain()
+                    if out:
+                        yield out
+
+                # The album's own description.md, in its folder beside the audio.
+                if _wants_description(row):
+                    try:
+                        chapters = []
+                        if row['is_concatenated']:
+                            merged = Path(row['file_path']).resolve()
+                            if merged.is_file():
+                                chapters = await loop.run_in_executor(
+                                    None, _read_file_chapters, merged
+                                )
+                        zf.writestr(
+                            f"{_album_folder(row)}/description.md",
+                            _safe_description_md(row, chapters),
+                        )
+                    except Exception as e:
+                        # Not fatal, and not lost either: the sweep below writes
+                        # the short form for anything that failed here.
+                        app_logger.warning(
+                            f"Batch zip description failed for {_album_folder(row)}: {e}"
+                        )
+                    out = sink.drain()
+                    if out:
+                        yield out
+
+            # Double-check every requested description actually made it in.
+            # It is the one thing in the archive with no file on disk behind it,
+            # so a failure above would leave the album silently without one —
+            # precisely the gap this pass exists to close. Reading back what the
+            # archive really contains beats trusting that the writes worked.
+            present = set(zf.namelist())
+            for row, _ in plan:
+                name = f"{_album_folder(row)}/description.md"
+                if not _wants_description(row) or name in present:
+                    continue
+                app_logger.warning(f"Batch zip: {name} was missing — writing it again")
+                zf.writestr(name, _safe_description_md(row, []))
+                present.add(name)
                 out = sink.drain()
                 if out:
                     yield out
@@ -1336,6 +1388,49 @@ def _build_description_md(row, chapters: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _wants_description(row) -> bool:
+    """Did this download ask for a description.md?"""
+    return bool(row['include_description'] if 'include_description' in row.keys() else 0)
+
+
+def _safe_description_md(row, chapters: list) -> str:
+    """description.md for one album, guaranteed to return text.
+
+    The description is generated rather than copied, so unlike the audio beside
+    it there is no file on disk to fall back on — one bad row (unparseable
+    lyrics JSON, a NULL where a string was assumed) would otherwise take the
+    whole archive down with it, or worse, quietly leave the album without one.
+
+    A description carrying only the artist, album and source link is still worth
+    having, so a failure degrades to that instead of to nothing.
+    """
+    try:
+        text = _build_description_md(row, chapters)
+        if text and text.strip():
+            return text
+        app_logger.warning(
+            f"Empty description for {row['album'] or row['title']} — using the short form"
+        )
+    except Exception as e:
+        app_logger.warning(
+            f"Description build failed for {row['album'] or row['title']} "
+            f"({e}) — using the short form"
+        )
+
+    artist = row['artist'] or 'Unknown Artist'
+    album = row['album'] or row['title'] or 'Album'
+    lines = [f"# {artist} / {album}"]
+    url = (row['url'] or '').strip()
+    if url.startswith('http'):
+        label = _PLATFORM_LABELS.get(row['platform'], (row['platform'] or 'Source').title())
+        lines += ["", f"{label} : {url}"]
+    lines += ["", (
+        f"No copyright infringement intended. All credit and rights belong to {artist}. "
+        f"Please support the original release."
+    )]
+    return "\n".join(lines) + "\n"
+
+
 def _get_download_row_and_file(download_id: str, allow_dir: bool = False):
     db = get_db()
     try:
@@ -1376,7 +1471,7 @@ async def download_description_md(download_id: str):
         loop = asyncio.get_running_loop()
         chapters = await loop.run_in_executor(None, _read_file_chapters, file_path)
 
-    md = _build_description_md(row, chapters)
+    md = _safe_description_md(row, chapters)
     return Response(
         content=md,
         media_type="text/markdown; charset=utf-8",
@@ -1413,9 +1508,7 @@ async def get_file(download_id: str):
     album  = sanitize_filename(row['album']  or row['title'] or '') or 'Album'
     is_playlist = bool(row['is_playlist'])
 
-    include_description = bool(
-        row['include_description'] if 'include_description' in row.keys() else 0
-    )
+    include_description = _wants_description(row)
 
     # A lone file with nothing to bundle beside it doesn't need an archive.
     # Zipping it just forces an extract step before the track will play. An
@@ -1460,7 +1553,7 @@ async def get_file(download_id: str):
                     chapters = []
                     if row['is_concatenated'] and file_path.is_file():
                         chapters = _read_file_chapters(file_path)
-                    zf.writestr('description.md', _build_description_md(row, chapters))
+                    zf.writestr('description.md', _safe_description_md(row, chapters))
         except FileNotFoundError:
             raise
 

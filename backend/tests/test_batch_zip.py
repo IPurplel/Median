@@ -229,3 +229,114 @@ def test_files_outside_the_download_folder_are_refused(client, batch_env, tmp_pa
 
     # Nothing left that is safe to serve
     assert client.get(f"/api/discography/batch/{BATCH}/file").status_code == 410
+
+
+# ── description.md inside each album folder ───────────────────────────────────
+
+def _want_descriptions():
+    from backend import db_models
+    db = db_models.get_db()
+    try:
+        db.execute("UPDATE downloads SET include_description=1 WHERE batch_id=?", (BATCH,))
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_no_description_unless_it_was_asked_for(client, batch_env):
+    names = _open_zip(client.get(f"/api/discography/batch/{BATCH}/file")).namelist()
+    assert not any(n.endswith('description.md') for n in names)
+
+
+def test_every_album_folder_gets_its_own_description(client, batch_env):
+    """The option is ticked once for the whole discography, so it has to reach
+    every album — not just the ones fetched one at a time."""
+    _want_descriptions()
+
+    zf = _open_zip(client.get(f"/api/discography/batch/{BATCH}/file"))
+    names = zf.namelist()
+    assert "First/description.md" in names
+    assert "Second/description.md" in names
+    assert zf.testzip() is None
+
+    # Beside the audio, not loose at the root of the archive
+    assert 'description.md' not in names
+
+    text = zf.read("First/description.md").decode()
+    assert "The Artist" in text and "First" in text
+    assert "https://a.bandcamp.com/album/x" in text
+
+
+def test_description_follows_the_per_album_choice(client, batch_env):
+    from backend import db_models
+    db = db_models.get_db()
+    try:
+        db.execute("UPDATE downloads SET include_description=1 WHERE album='First'")
+        db.commit()
+    finally:
+        db.close()
+
+    names = _open_zip(client.get(f"/api/discography/batch/{BATCH}/file")).namelist()
+    assert "First/description.md" in names
+    assert "Second/description.md" not in names
+
+
+def test_a_broken_description_still_lands_in_the_folder(client, batch_env, monkeypatch,
+                                                        caplog):
+    """The re-check pass. Reading chapters off the merged album fails here (a
+    missing ffprobe does exactly this), which aborts that album's description
+    mid-build — the sweep afterwards has to notice and write it anyway."""
+    import logging
+    from backend import app as app_mod
+
+    def boom(_path):
+        raise RuntimeError("ffprobe exploded")
+
+    monkeypatch.setattr(app_mod, "_read_file_chapters", boom)
+    _want_descriptions()
+
+    with caplog.at_level(logging.WARNING, logger="median"):
+        zf = _open_zip(client.get(f"/api/discography/batch/{BATCH}/file"))
+
+    # Proof the recovery ran rather than the description simply working: the
+    # first attempt has to have failed, and the sweep has to have noticed.
+    assert "ffprobe exploded" in caplog.text
+    assert "was missing — writing it again" in caplog.text
+
+    assert zf.testzip() is None
+    # 'Second' is the merged album whose chapter read blew up
+    assert "Second/description.md" in zf.namelist()
+    text = zf.read("Second/description.md").decode()
+    assert "The Artist" in text and "Second" in text
+    # The album it belongs to is still intact
+    assert zf.read("Second/Second.mp3") == b"merged"
+
+
+def test_the_recheck_does_not_duplicate_descriptions(client, batch_env):
+    _want_descriptions()
+    names = _open_zip(client.get(f"/api/discography/batch/{BATCH}/file")).namelist()
+    assert names.count("First/description.md") == 1
+    assert names.count("Second/description.md") == 1
+
+
+def test_short_form_description_when_the_full_build_fails(batch_env, monkeypatch):
+    """_safe_description_md never returns nothing: a description carrying only
+    the artist, album and source beats the silent omission it replaces."""
+    from backend import app as app_mod
+    from backend import db_models
+
+    db = db_models.get_db()
+    try:
+        row = db.execute("SELECT * FROM downloads WHERE album='First'").fetchone()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(app_mod, "_build_description_md",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("bad lyrics json")))
+    text = app_mod._safe_description_md(row, [])
+    assert "The Artist" in text and "First" in text
+    assert "https://a.bandcamp.com/album/x" in text
+
+    # An empty build is treated the same way as a failed one
+    monkeypatch.setattr(app_mod, "_build_description_md", lambda *a, **k: "   ")
+    assert "The Artist" in app_mod._safe_description_md(row, [])
