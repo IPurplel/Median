@@ -79,7 +79,13 @@ const PATTERNS = {
   youtube:    /(?:youtube\.com\/(?:watch|playlist|@|channel)|youtu\.be\/)/i,
   soundcloud: /soundcloud\.com\//i,
   bandcamp:   /\.bandcamp\.com\//i,
+  spotify:    /(?:open\.)?spotify\.com\/(?:intl-\w+\/)?(?:track|album|playlist|artist)\/|^spotify:(?:track|album|playlist|artist):/i,
 };
+
+// Spotify's audio is DRM-protected and can't be downloaded, so Median only
+// reads the tracklist from it and fetches the recordings from YouTube. Say so
+// the moment a link is pasted rather than letting it be a surprise.
+const SPOTIFY_NOTE = ' — tracklist from Spotify, audio from YouTube';
 
 urlInput.addEventListener('input', () => {
   const url = urlInput.value.trim();
@@ -101,6 +107,7 @@ urlInput.addEventListener('input', () => {
 
   detectedPform.textContent = found
     ? `✦ ${found.charAt(0).toUpperCase() + found.slice(1)} detected`
+      + (found === 'spotify' ? SPOTIFY_NOTE : '')
     : '';
 
   // Highlight matching platform pill in header
@@ -108,9 +115,9 @@ urlInput.addEventListener('input', () => {
     pill.classList.toggle('active-platform', pill.dataset.platform === found);
   });
 
-  // Show Cover+Audio tab only for SC/Bandcamp
+  // Show Cover+Audio tab only where there's real square album art to use
   const coverTab = $('.cover-audio-tab');
-  if (found === 'soundcloud' || found === 'bandcamp') {
+  if (found === 'soundcloud' || found === 'bandcamp' || found === 'spotify') {
     coverTab.classList.remove('hidden');
   } else {
     coverTab.classList.add('hidden');
@@ -255,10 +262,11 @@ function renderMeta(meta) {
     tracksHead.classList.add('hidden');
   }
 
-  // Show Cover+Audio tab only for SoundCloud / Bandcamp (have album art)
+  // Show Cover+Audio tab only for platforms with real album art (not a video
+  // thumbnail) — SoundCloud, Bandcamp and Spotify all publish square covers.
   const coverTab = $('.cover-audio-tab');
   const p = meta.platform;
-  if (p === 'soundcloud' || p === 'bandcamp') {
+  if (p === 'soundcloud' || p === 'bandcamp' || p === 'spotify') {
     coverTab.classList.remove('hidden');
   } else {
     coverTab.classList.add('hidden');
@@ -1001,7 +1009,14 @@ function buildDlItem(id, title, artist, status, progress, speed, eta, message, t
   }[status] || '';
 
   const metaLeft = message || speed || (status === 'downloading' ? 'Connecting...' : '');
-  const metaRight = `${progress ? Math.round(progress) + '%' : ''} ${eta ? '· ' + eta : ''}`.trim();
+  // "2m 30s" on its own is ambiguous — it could be elapsed, or the track
+  // length. Only running downloads have time remaining at all; a finished one
+  // showing a countdown would be nonsense even if a stale value arrived.
+  const showEta = eta && status === 'downloading';
+  const metaRight = [
+    progress ? Math.round(progress) + '%' : '',
+    showEta ? `${eta} left` : '',
+  ].filter(Boolean).join(' · ');
 
   const showTracks = status === 'completed' && total_tracks > 1 && !is_concatenated;
   const tracksSection = showTracks ? `
@@ -1205,7 +1220,10 @@ async function renderQueue() {
         </div>
         <div class="dl-meta">
           <span>${i + 1} of ${items.length} in queue</span>
-          <span>${item.progress ? Math.round(item.progress) + '%' : ''}</span>
+          <span>${[
+            item.progress ? Math.round(item.progress) + '%' : '',
+            item.status === 'downloading' && item.eta ? `${escHtml(item.eta)} left` : '',
+          ].filter(Boolean).join(' · ')}</span>
         </div>
         ${(item.warnings || []).map((w) => `<div class="dl-warning">⚠ ${escHtml(w)}</div>`).join('')}
       </div>
@@ -1228,6 +1246,7 @@ function initHistory() {
         <option value="youtube">YouTube</option>
         <option value="soundcloud">SoundCloud</option>
         <option value="bandcamp">Bandcamp</option>
+        <option value="spotify">Spotify</option>
       </select>
     </div>
     <div id="history-table-wrap"></div>

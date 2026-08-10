@@ -571,7 +571,9 @@ async def create_cover_audio_video(
 
         # Forward only warnings to the outer callback: the inner merge reports its
         # own percentages (10%…) which would drag the cover flow's bar backwards.
-        async def _warnings_only(pct, message='', warning=None):
+        # **_ absorbs the speed/eta the download path also reports, so this
+        # adapter doesn't have to track the callback signature.
+        async def _warnings_only(pct, message='', warning=None, **_):
             if warning and progress_callback:
                 try:
                     await progress_callback(None, '', warning=warning)

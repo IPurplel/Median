@@ -48,6 +48,12 @@
           <img src="/assets/bandcamp-logo.svg" alt="Bandcamp" class="platform-logo">
           <span class="platform-name">Bandcamp</span>
         </div>
+        <div class="platform-pill" data-platform="spotify"
+             title="Spotify supplies the tracklist and tags; the audio is fetched from YouTube">
+          <span class="status-dot"></span>
+          <img src="/assets/spotify-logo.svg" alt="Spotify" class="platform-logo">
+          <span class="platform-name">Spotify</span>
+        </div>
       </nav>
 
       <div class="header-actions">
@@ -85,7 +91,7 @@
               type="text"
               id="url-input"
               class="url-input"
-              placeholder="Paste a YouTube, SoundCloud, or Bandcamp URL…"
+              placeholder="Paste a YouTube, SoundCloud, Bandcamp, or Spotify URL…"
               autocomplete="off"
               spellcheck="false"
             >
@@ -372,7 +378,7 @@
           <div class="step-num">1</div>
           <div class="step-content">
             <strong>Paste a URL</strong>
-            <p>Copy any YouTube video or playlist, SoundCloud track or set, or Bandcamp album URL and paste it into the input field above.</p>
+            <p>Copy any YouTube video or playlist, SoundCloud track or set, Bandcamp album, or Spotify track / album / playlist URL and paste it into the input field above. Spotify links work a little differently — see step 3.</p>
           </div>
         </div>
         <div class="help-step">
@@ -385,55 +391,64 @@
         <div class="help-step">
           <div class="step-num">3</div>
           <div class="step-content">
-            <strong>Choose your format</strong>
-            <p>Pick <em>Audio Only</em> (MP3 / FLAC / AAC), <em>Video Only</em> (MP4 / MKV / WebM), or <em>Cover + Audio</em> for SoundCloud/Bandcamp tracks with artwork embedded as video. In Cover + Audio you can upload your own cover image and choose its aspect ratio, resolution, and output format.</p>
-            <p>The bitrate list has an <strong>Original (no re-encode)</strong> option. Every one of these sites streams already-compressed audio, so converting it again can only lose a little and make the file bigger — picking a number higher than the source gains you nothing. <em>Original</em> copies the audio across untouched and saves it in whatever format it already was, usually <code>.mp3</code> from Bandcamp or <code>.opus</code> from YouTube. On YouTube that's typically a 4&nbsp;MB file instead of a 10&nbsp;MB one, at better quality. Tags and cover art are still written. Use a fixed bitrate when you specifically need everything to be MP3 — for the merged albums you upload, say.</p>
+            <strong>About Spotify links</strong>
+            <p>Spotify's own audio is copy-protected and <strong>cannot be downloaded</strong> — not by Median, not by anything else. What Median does instead is read the <em>tracklist</em> from your Spotify link (song titles, artists, album, cover art, exact durations), then find each of those recordings on YouTube and download them from there. <strong>Spotify says what the music is; YouTube provides the audio.</strong></p>
+            <p>What you get is properly tagged: titles, artists, album, track numbers and the real square Spotify cover, instead of the "Artist - Song (Official Video)" mess a YouTube download normally leaves behind. Paste a track, an album, or a playlist. No Spotify account or API key is needed, and nothing has to be paid for.</p>
+            <p>The catch is that matching is a best guess. Median picks the closest result by duration, title and channel — the song's exact length is the strongest clue, so an album version won't be swapped for the radio edit. When it isn't confident, or when a song can't be found on YouTube at all, it says so in a note under the download rather than quietly giving you the wrong take. It's worth a listen to anything flagged. Audio quality is whatever YouTube has, which is generally fine but isn't Spotify's stream.</p>
           </div>
         </div>
         <div class="help-step">
           <div class="step-num">4</div>
+          <div class="step-content">
+            <strong>Choose your format</strong>
+            <p>Pick <em>Audio Only</em> (MP3 / FLAC / AAC), <em>Video Only</em> (MP4 / MKV / WebM), or <em>Cover + Audio</em> for SoundCloud/Bandcamp/Spotify tracks with artwork embedded as video. In Cover + Audio you can upload your own cover image and choose its aspect ratio, resolution, and output format.</p>
+            <p>The bitrate list has an <strong>Original (no re-encode)</strong> option. Every one of these sites streams already-compressed audio, so converting it again can only lose a little and make the file bigger — picking a number higher than the source gains you nothing. <em>Original</em> copies the audio across untouched and saves it in whatever format it already was, usually <code>.mp3</code> from Bandcamp or <code>.opus</code> from YouTube. On YouTube that's typically a 4&nbsp;MB file instead of a 10&nbsp;MB one, at better quality. Tags and cover art are still written. Use a fixed bitrate when you specifically need everything to be MP3 — for the merged albums you upload, say.</p>
+          </div>
+        </div>
+        <div class="help-step">
+          <div class="step-num">5</div>
           <div class="step-content">
             <strong>Pick the songs you want</strong>
             <p>For an album or playlist, every track is listed with a tick box — untick any song you don't want and it won't be downloaded. <em>Select all</em> / <em>Deselect all</em> is there for quick changes, and the counter above the list shows how many are picked. Leaving everything ticked downloads the whole album as usual. Picked songs keep their original album track numbers in the filename (choose tracks 2, 5 and 6 and you get <em>002</em>, <em>005</em>, <em>006</em>), so they still sort correctly next to the rest of the album.</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">5</div>
+          <div class="step-num">6</div>
           <div class="step-content">
             <strong>For playlists: merge or keep separate</strong>
             <p>Toggle <em>Merge into single file</em> to combine all tracks into one file with chapter markers — you can skip between songs inside the file. With merge on, you can also enable <em>Crossfade</em> to blend each track into the next and pick the overlap length. If a crossfade can't be applied (e.g. a track is too short), the merge falls back to hard cuts and a note appears under the download.</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">6</div>
-          <div class="step-content">
-            <strong>For albums: grab the artist's whole discography</strong>
-            <p>Toggle <em>Download every album by this artist</em> and Median looks up the artist's releases page, then lists every album it finds with a checkbox each — untick the ones you already have, or use <em>Select all</em> / <em>Deselect all</em>. Each ticked album is queued as its own download and lands in its own <em>Artist - Album</em> folder, with its own cover, tags and <code>description.md</code>. Every other setting on the form (format, bitrate, merge, description) applies to all of them. They download a few at a time rather than all at once, so a large discography works through the queue steadily. Once the last album finishes, a <em>Download all albums as one zip</em> button appears at the top of Active Downloads — the zip is named after the band alone, and unzipping it gives one folder per album. Any album that failed is listed in a <code>MISSING ALBUMS.txt</code> inside the archive rather than quietly left out. Albums in a batch are protected from auto-cleanup until you collect them, so the earliest ones can't expire while the last are still downloading — that protection lifts a few hours after the batch finishes, so an abandoned batch doesn't fill the disk forever. Once you've downloaded the zip the server's copies are redundant, so they're deleted a few minutes later rather than lingering for the usual retention window — a discography is several gigabytes worth reclaiming. The batch is remembered by the server, so refreshing the page or coming back later still gets you the button.</p>
-          </div>
-        </div>
-        <div class="help-step">
           <div class="step-num">7</div>
           <div class="step-content">
-            <strong>Hit Download</strong>
-            <p>The download runs in the background. Track it in the <em>Active Downloads</em> section. When done, the file stays on the server for at least 90 minutes before auto-cleanup removes it — press <em>Keep</em> on the finished download to hold onto it indefinitely. A single track, or an album you merged into one file, downloads as plain audio you can play straight away; you only get a <code>.zip</code> when there's genuinely more than one file to carry (an album kept as separate tracks, or anything bundled with <code>description.md</code>). Album covers are embedded automatically (MP3/FLAC/AAC tags, MP4/MKV containers); WebM can't hold embedded art, so the cover is saved separately and a note tells you so.</p>
+            <strong>For albums: grab the artist's whole discography</strong>
+            <p>Toggle <em>Download every album by this artist</em> and Median looks up the artist's releases page, then lists every album it finds with a checkbox each. (For Spotify the album list comes from <a href="https://musicbrainz.org" target="_blank" rel="noopener">MusicBrainz</a> instead — Spotify doesn't publish an artist's back catalogue without a paid key. You can paste an artist link directly.) — untick the ones you already have, or use <em>Select all</em> / <em>Deselect all</em>. Each ticked album is queued as its own download and lands in its own <em>Artist - Album</em> folder, with its own cover, tags and <code>description.md</code>. Every other setting on the form (format, bitrate, merge, description) applies to all of them. They download a few at a time rather than all at once, so a large discography works through the queue steadily. Once the last album finishes, a <em>Download all albums as one zip</em> button appears at the top of Active Downloads — the zip is named after the band alone, and unzipping it gives one folder per album. Any album that failed is listed in a <code>MISSING ALBUMS.txt</code> inside the archive rather than quietly left out. Albums in a batch are protected from auto-cleanup until you collect them, so the earliest ones can't expire while the last are still downloading — that protection lifts a few hours after the batch finishes, so an abandoned batch doesn't fill the disk forever. Once you've downloaded the zip the server's copies are redundant, so they're deleted a few minutes later rather than lingering for the usual retention window — a discography is several gigabytes worth reclaiming. The batch is remembered by the server, so refreshing the page or coming back later still gets you the button.</p>
           </div>
         </div>
         <div class="help-step">
           <div class="step-num">8</div>
+          <div class="step-content">
+            <strong>Hit Download</strong>
+            <p>The download runs in the background. Track it in the <em>Active Downloads</em> section, which shows the percentage, the current transfer rate and an estimate of the time left. The estimate appears once Median has enough of the job behind it to give a figure worth trusting — for an album it's weighted by track length, so a short interlude doesn't make it lurch — and it's dropped during steps whose length can't be predicted, like merging tracks or converting a file, rather than showing a number it can't stand behind. When done, the file stays on the server for at least 90 minutes before auto-cleanup removes it — press <em>Keep</em> on the finished download to hold onto it indefinitely. A single track, or an album you merged into one file, downloads as plain audio you can play straight away; you only get a <code>.zip</code> when there's genuinely more than one file to carry (an album kept as separate tracks, or anything bundled with <code>description.md</code>). Album covers are embedded automatically (MP3/FLAC/AAC tags, MP4/MKV containers); WebM can't hold embedded art, so the cover is saved separately and a note tells you so.</p>
+          </div>
+        </div>
+        <div class="help-step">
+          <div class="step-num">9</div>
           <div class="step-content">
             <strong>Chapters &amp; the description file</strong>
             <p>Turn on <em>Include description.md</em> before downloading to bundle a markdown file with your download: the tracklist (for merged albums, with crossfade-corrected timestamps), Bandcamp lyrics (also embedded into each file's tags so music players show them), the source link, the release date, the album tags as hashtags, and a credits line. On a finished merged album, the <em>≡ Chapters</em> button shows the chapter table with <em>Copy for YouTube description</em> — paste it into a YouTube description and YouTube creates the chapters (it ignores chapters embedded in the file itself).</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">9</div>
+          <div class="step-num">10</div>
           <div class="step-content">
             <strong>Out of space? Clean now</strong>
             <p>The 🗑 button in the top-right corner (next to this help button) deletes every finished download from the server straight away, instead of waiting for auto-cleanup. Use it when you've downloaded more than the container has room for. It tells you how many files and how much space it will free and asks you to confirm first, because <strong>this is not reversible</strong> — anything you haven't saved to your own machine is gone, including files you marked <em>Keep</em> and discography zips you never collected. Downloads still in progress are never touched, so it's safe to press while something is running. If Median also spots files in the download folder it has no record of — leftovers from an older install or a database reset — it lists them by name and asks separately whether to delete those too, so you can clear the first lot and keep the strays if you're unsure.</p>
           </div>
         </div>
         <div class="help-step">
-          <div class="step-num">10</div>
+          <div class="step-num">11</div>
           <div class="step-content">
             <strong>History, queue &amp; themes</strong>
             <p>The <em>History</em> panel lists past downloads — a ⬇ button appears next to a song's name while its file is still on the server, so you can grab it again. The sun/moon button switches dark/light mode, and the palette button next to it cycles through six extra color themes — one click per theme, wrapping back to the original at the end.</p>

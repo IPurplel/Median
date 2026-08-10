@@ -22,6 +22,17 @@ PLATFORM_PATTERNS = {
         r"(?:https?://)?[\w-]+\.bandcamp\.com/album/[\w-]+",
         r"(?:https?://)?[\w-]+\.bandcamp\.com",
     ],
+    # Spotify supplies metadata only — its audio is DRM-encrypted and is never
+    # downloaded. The matching recordings are fetched from YouTube instead, so
+    # a MusicBrainz release group (the only place an artist's back catalogue is
+    # readable without a paid Spotify API key) counts as a Spotify URL too: it
+    # can only ever reach Median through a Spotify artist link.
+    "spotify": [
+        r"(?:https?://)?(?:www\.|open\.)?spotify\.com(?:/intl-[a-z]{2,3})?"
+        r"/(?:track|album|playlist|artist)/[A-Za-z0-9]{22}",
+        r"spotify:(?:track|album|playlist|artist):[A-Za-z0-9]{22}",
+        r"(?:https?://)?(?:www\.)?musicbrainz\.org/release-group/[0-9a-f-]{36}",
+    ],
 }
 
 _UUID_RE = re.compile(
@@ -56,6 +67,9 @@ def is_playlist_url(url: str) -> bool:
         r"youtube\.com/@[\w-]+",
         r"youtube\.com/channel/",
         r"soundcloud\.com/[\w-]+$",
+        r"spotify\.com(?:/intl-[a-z]{2,3})?/(?:album|playlist|artist)/",
+        r"^spotify:(?:album|playlist|artist):",
+        r"musicbrainz\.org/release-group/",
     ]
     for pattern in playlist_patterns:
         if re.search(pattern, url, re.IGNORECASE):
@@ -99,6 +113,15 @@ def validate_url(url: str, max_length: int = 2048) -> Tuple[bool, Optional[str],
     if len(url) > max_length:
         return False, None, f"URL is too long (max {max_length} characters)"
 
+    # `spotify:album:ID` is what Spotify's desktop app puts on the clipboard.
+    # It has no netloc, so normalize it to the web form before parsing.
+    if url.lower().startswith('spotify:'):
+        from backend.spotify import canonical_url, parse_spotify_url
+        parsed_uri = parse_spotify_url(url)
+        if not parsed_uri:
+            return False, None, "That doesn't look like a valid Spotify link"
+        url = canonical_url(*parsed_uri)
+
     try:
         parsed = urlparse(url)
         if not parsed.scheme:
@@ -112,6 +135,9 @@ def validate_url(url: str, max_length: int = 2048) -> Tuple[bool, Optional[str],
 
     platform = detect_platform(url)
     if not platform:
-        return False, None, "Platform not supported. Supported: YouTube, SoundCloud, Bandcamp"
+        return False, None, (
+            "Platform not supported. Supported: YouTube, SoundCloud, "
+            "Bandcamp, Spotify"
+        )
 
     return True, platform, None

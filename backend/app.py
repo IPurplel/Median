@@ -356,6 +356,9 @@ async def platform_status():
         "youtube":    "https://www.youtube.com",
         "soundcloud": "https://soundcloud.com",
         "bandcamp":   "https://bandcamp.com",
+        # The embed player, not the main site — that is the only part Median
+        # reads, and it stays up independently of open.spotify.com's app shell.
+        "spotify":    "https://open.spotify.com/embed/track/4cOdK2wGLETKBW3PvgPWqT",
     }
 
     async def check_one(name: str, url: str) -> tuple:

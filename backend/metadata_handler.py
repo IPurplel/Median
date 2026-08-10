@@ -28,6 +28,20 @@ async def extract_metadata(url: str, force_refresh: bool = False) -> Dict[str, A
         return result
 
 
+def _extract_spotify(url: str) -> Dict[str, Any]:
+    """Spotify (or MusicBrainz release-group) URL → Median metadata dict.
+
+    Blocking — both sources are plain HTTP page reads, so this runs in an
+    executor rather than on the event loop.
+    """
+    from backend import spotify
+
+    mbid = spotify.parse_release_group_url(url)
+    if mbid:
+        return spotify.release_group_metadata(mbid, url)
+    return spotify.fetch_metadata(url)
+
+
 async def _do_extract(url: str) -> Dict[str, Any]:
     try:
         import yt_dlp
@@ -36,6 +50,15 @@ async def _do_extract(url: str) -> Dict[str, Any]:
         loop = asyncio.get_running_loop()
         platform = detect_platform(url)
         is_list   = is_playlist_url(url)
+
+        # Spotify never reaches yt-dlp: its audio is DRM-encrypted and there is
+        # no extractor for it. Read the tracklist from Spotify's own page (or
+        # MusicBrainz, for albums reached through an artist link) and let the
+        # queue match each track to a YouTube upload at download time.
+        if platform == 'spotify':
+            metadata = await loop.run_in_executor(None, _extract_spotify, url)
+            metadata_cache.set(url, metadata)
+            return metadata
 
         if is_list:
             flat_opts = {

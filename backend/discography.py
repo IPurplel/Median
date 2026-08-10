@@ -253,6 +253,59 @@ async def _enrich_bandcamp_titles(page_url: str, albums: list) -> None:
             album['title_is_guess'] = False
 
 
+async def _spotify_discography(url: str, metadata: dict) -> dict:
+    """Albums by the artist behind a Spotify link, courtesy of MusicBrainz.
+
+    Spotify won't serve a back catalogue without a paid API key — /embed/artist
+    returns ten top tracks and the artist page is an empty JS shell — so only
+    the artist's *name* comes from Spotify. MusicBrainz supplies the releases,
+    and each album's tracklist is read from there too at download time.
+    """
+    from backend import spotify
+
+    loop = asyncio.get_running_loop()
+    artist = (metadata.get('artist') or '').strip()
+
+    parsed = spotify.parse_spotify_url(url)
+    if parsed and parsed[0] == 'artist':
+        try:
+            artist = await loop.run_in_executor(None, spotify.artist_name, parsed[1])
+        except Exception as e:
+            app_logger.warning(f"Spotify artist lookup failed for {url}: {e}")
+
+    result = {'platform': 'spotify', 'artist': artist, 'source_page': '', 'albums': []}
+    if not artist:
+        result['note'] = "Median couldn't work out which artist this link belongs to."
+        return result
+
+    cache_key = f'{_CACHE_PREFIX}spotify::{artist.lower()}'
+    cached = metadata_cache.get(cache_key)
+    if cached:
+        return cached
+
+    try:
+        albums = await loop.run_in_executor(None, spotify.artist_discography, artist)
+    except Exception as e:
+        app_logger.warning(f"MusicBrainz discography failed for {artist!r}: {e}")
+        result['note'] = "Couldn't reach MusicBrainz to list this artist's albums."
+        return result
+
+    result['albums'] = albums
+    result['source_page'] = 'https://musicbrainz.org'
+    if not albums:
+        result['note'] = (
+            f"MusicBrainz doesn't list any albums for {artist}."
+        )
+    else:
+        result['note'] = (
+            "Album list from MusicBrainz — Spotify doesn't publish an artist's "
+            "releases without a paid key. Audio comes from YouTube."
+        )
+
+    metadata_cache.set(cache_key, result, ttl=_CACHE_TTL)
+    return result
+
+
 async def resolve_discography(
     url: str,
     metadata: Optional[dict] = None,
@@ -267,6 +320,9 @@ async def resolve_discography(
     metadata = metadata or {}
     platform = detect_platform(url) or ''
     artist = (metadata.get('artist') or '').strip()
+
+    if platform == 'spotify':
+        return await _spotify_discography(url, metadata)
 
     pages = artist_pages(url, metadata)
     if not pages:

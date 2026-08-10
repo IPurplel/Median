@@ -21,8 +21,18 @@ def write_tags(
     year: str = '',
     genre: str = '',
     cover_path: Optional[str] = None,
+    track: int = 0,
+    track_total: int = 0,
+    clear_track: bool = False,
 ) -> bool:
-    """Write tags onto an audio file. Returns True on success."""
+    """Write tags onto an audio file. Returns True on success.
+
+    `clear_track` drops any existing track number rather than keeping it. Used
+    when the audio came from a source unrelated to the release being tagged —
+    a YouTube upload matched to a Spotify track arrives carrying whatever
+    position it held on *its* album, which is meaningless here and makes
+    players sort a standalone song into the middle of nowhere.
+    """
     p = Path(file_path)
     if not p.is_file():
         app_logger.warning(f"tag_writer: file not found: {file_path}")
@@ -35,6 +45,9 @@ def write_tags(
         'album': (album or '').strip(),
         'year': (year or '').strip(),
         'genre': (genre or '').strip(),
+        'track': int(track or 0),
+        'track_total': int(track_total or 0),
+        'clear_track': bool(clear_track),
     }
 
     try:
@@ -153,7 +166,7 @@ def _cover_mime(cover_path: str) -> str:
 def _write_mp3(file_path: str, f: dict, cover_path: Optional[str]):
     from mutagen.id3 import (
         ID3, ID3NoHeaderError,
-        TIT2, TPE1, TALB, TDRC, TYER, TCON, APIC,
+        TIT2, TPE1, TALB, TDRC, TYER, TCON, APIC, TRCK,
     )
 
     try:
@@ -165,6 +178,14 @@ def _write_mp3(file_path: str, f: dict, cover_path: Optional[str]):
     if f['artist']: tags['TPE1'] = TPE1(encoding=3, text=f['artist'])
     if f['album']:  tags['TALB'] = TALB(encoding=3, text=f['album'])
     if f['genre']:  tags['TCON'] = TCON(encoding=3, text=f['genre'])
+    if f['clear_track'] or f['track']:
+        tags.delall('TRCK')
+    if f['track']:
+        # "5/12" when the album length is known — players show the total, and
+        # it stops a partial album sorting as though it were complete.
+        number = (f"{f['track']}/{f['track_total']}" if f['track_total']
+                  else str(f['track']))
+        tags['TRCK'] = TRCK(encoding=3, text=number)
     if f['year']:
         # Write both — TDRC is the v2.4 frame, TYER the v2.3 one. Some players
         # (AIMP among them) read TYER preferentially even from v2.4 files.
@@ -206,6 +227,13 @@ def _write_flac(file_path: str, f: dict, cover_path: Optional[str]):
     if f['album']:  audio['album'] = f['album']
     if f['year']:   audio['date'] = f['year']
     if f['genre']:  audio['genre'] = f['genre']
+    if f['clear_track']:
+        audio.pop('tracknumber', None)
+        audio.pop('tracktotal', None)
+    if f['track']:
+        audio['tracknumber'] = str(f['track'])
+        if f['track_total']:
+            audio['tracktotal'] = str(f['track_total'])
 
     if cover_path and Path(cover_path).is_file():
         audio.clear_pictures()
@@ -228,6 +256,9 @@ def _write_mp4(file_path: str, f: dict, cover_path: Optional[str]):
     if f['album']:  audio['\xa9alb'] = [f['album']]
     if f['year']:   audio['\xa9day'] = [f['year']]
     if f['genre']:  audio['\xa9gen'] = [f['genre']]
+    if f['clear_track']:
+        audio.pop('trkn', None)
+    if f['track']:  audio['trkn'] = [(f['track'], f['track_total'])]
 
     if cover_path and Path(cover_path).is_file():
         data = Path(cover_path).read_bytes()
@@ -249,6 +280,13 @@ def _write_ogg(file_path: str, f: dict, cover_path: Optional[str], opus: bool):
     if f['album']:  audio['album'] = f['album']
     if f['year']:   audio['date'] = f['year']
     if f['genre']:  audio['genre'] = f['genre']
+    if f['clear_track']:
+        audio.pop('tracknumber', None)
+        audio.pop('tracktotal', None)
+    if f['track']:
+        audio['tracknumber'] = str(f['track'])
+        if f['track_total']:
+            audio['tracktotal'] = str(f['track_total'])
 
     if cover_path and Path(cover_path).is_file():
         pic = Picture()

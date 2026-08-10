@@ -18,6 +18,30 @@ class Settings(BaseSettings):
     # Ceiling on "download the artist's whole discography" — one queued
     # download per album, so this caps how much a single click can enqueue.
     MAX_DISCOGRAPHY_ALBUMS: int = 100
+
+    # Spotify links carry no audio (it's DRM'd), so each track is looked up on
+    # YouTube instead. That's one search per track: concurrency keeps an album
+    # resolving in seconds without starving the executor the downloads share.
+    SPOTIFY_MATCH_CONCURRENCY: int = 4
+    # Search results to score per track. More candidates find the right version
+    # of a song more often, at a linear cost in search time.
+    YT_MATCH_RESULTS: int = 5
+    # How many of the top-scoring candidates to confirm are actually
+    # downloadable before giving up. Search lists region-locked and removed
+    # videos, so the best-scoring one is not always fetchable.
+    YT_MATCH_VERIFY: int = 3
+    # Runner-up URLs carried alongside the chosen one. YouTube hands out
+    # sporadic 403s on healthy videos; a fresh extraction usually clears it,
+    # but if a video stays stubborn these give the downloader somewhere else
+    # to go rather than leaving a hole in the album.
+    YT_MATCH_FALLBACKS: int = 2
+    # Attempts per source URL before moving to the next. yt-dlp's own `retries`
+    # cannot help here — it re-requests the *same* expired URL, whereas each
+    # attempt here re-extracts and gets a freshly signed one.
+    TRACK_DOWNLOAD_ATTEMPTS: int = 2
+    # Spotify's embed player renders long playlists in full, but a 2000-track
+    # playlist is not a reasonable single download.
+    MAX_SPOTIFY_PLAYLIST_TRACKS: int = 200
     # Discography albums are exempt from auto-cleanup until the combined zip is
     # collected, otherwise the earliest ones expire while the last are still
     # downloading. This releases an uncollected batch anyway, counted from when
@@ -90,6 +114,12 @@ class Settings(BaseSettings):
         "i.ytimg.com", "i9.ytimg.com",
         "i1.sndcdn.com", "i2.sndcdn.com",
         "f4.bcbits.com",
+        # Spotify serves art from a rotating set of CDN hostnames
+        # (image-cdn-fa, image-cdn-ak, …) that all mirror i.scdn.co. Album art
+        # is rewritten onto i.scdn.co by upgrade_thumbnail_url; the two others
+        # cover playlist mosaics, whose ids aren't rewritable.
+        "i.scdn.co", "mosaic.scdn.co", "image-cdn-ak.spotifycdn.com",
+        "image-cdn-fa.spotifycdn.com",
     }
 
     @property

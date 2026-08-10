@@ -29,6 +29,17 @@ COVER_CACHE_DIR = Path(settings.UPLOAD_FOLDER) / ".cover_cache"
 # Size codes downscale the source; _0 is the artist's full original upload.
 _BCBITS_ART_RE = re.compile(r"(https?://f4\.bcbits\.com/img/a\d+)_\d+(\.\w+)$")
 
+# Spotify album art: https://{host}/image/ab67616d{size}{ID}
+# The size is encoded in the id itself — 00004851 is 64px, 00001e02 is 300px
+# (the largest the embed player ever links) and 0000b273 is 640px. Swapping the
+# code in yields the big one; the small variants are useless as embedded cover
+# art. Every image host mirrors the same paths, so they are normalized onto
+# i.scdn.co, which keeps the proxy's allow-list to a single entry.
+_SPOTIFY_ART_RE = re.compile(
+    r"https?://[\w.-]*(?:scdn\.co|spotifycdn\.com)/image/ab67616d[0-9a-f]{8}(\w+)$",
+    re.IGNORECASE,
+)
+
 
 def upgrade_thumbnail_url(url: str) -> str:
     if not url:
@@ -36,6 +47,9 @@ def upgrade_thumbnail_url(url: str) -> str:
     m = _BCBITS_ART_RE.match(url)
     if m:
         return f"{m.group(1)}_0{m.group(2)}"
+    m = _SPOTIFY_ART_RE.match(url)
+    if m:
+        return f"https://i.scdn.co/image/ab67616d0000b273{m.group(1)}"
     return url
 
 

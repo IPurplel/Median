@@ -11,7 +11,7 @@ from backend.utils.file_organizer import (
     get_playlist_folder,
     ensure_unique_path, find_downloaded_file, find_any_media_file
 )
-from backend.utils.validators import ORIGINAL_BITRATE
+from backend.utils.validators import ORIGINAL_BITRATE, sanitize_filename
 from backend.concatenation_engine import (
     concatenate_audio, concatenate_video, create_cover_audio_video,
     attach_cover_to_mkv,
@@ -20,6 +20,7 @@ from backend.image_processor import download_cover_image
 from backend.logger import app_logger
 from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP
 from backend.utils.tag_writer import write_tags
+from backend.utils.eta import JobEta, TrackWeights, normalize_ytdlp_eta
 
 
 def _keeps_original(download_type: str, bitrate: str) -> bool:
@@ -205,22 +206,35 @@ async def download_single(
             downloaded = d.get('downloaded_bytes', 0)
             pct = min(90, (downloaded / total) * 90)
             speed = d.get('_speed_str', '').strip()
-            eta = d.get('_eta_str', '').strip()
+            # One file, so yt-dlp's own figure is the best available — it is
+            # computed from the live transfer rate rather than extrapolated.
+            eta = normalize_ytdlp_eta(d.get('eta') or d.get('_eta_str'))
             last_progress.update({'pct': pct, 'speed': speed, 'eta': eta})
 
             if progress_callback and main_loop.is_running():
                 asyncio.run_coroutine_threadsafe(
-                    progress_callback(pct, f"Downloading... {speed}"),
+                    progress_callback(pct, f"Downloading... {speed}",
+                                      speed=speed, eta=eta),
+                    main_loop
+                )
+        elif d['status'] == 'finished':
+            # Bytes are in; conversion and tagging still to come, and their
+            # duration isn't knowable — better to drop the estimate than to
+            # leave a stale one counting down against nothing.
+            if progress_callback and main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    progress_callback(90, "Processing...", speed='', eta=''),
                     main_loop
                 )
 
     ydl_opts = get_ydl_opts(download_type, fmt, bitrate, temp_template + '.%(ext)s', hook)
 
-    def _download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-    await asyncio.get_running_loop().run_in_executor(None, _download)
+    # Matched sources (a Spotify track found on YouTube) carry ranked
+    # runner-ups; everything else is just the one URL, and behaves as before.
+    await _fetch_with_fallback(
+        [url] + list(metadata.get('url_alternatives') or []),
+        ydl_opts, f"{artist} - {title}",
+    )
 
     audio_ext = 'mp3' if download_type == 'cover_audio' else ext
 
@@ -356,7 +370,10 @@ async def download_single(
         # this already, but leaves album empty for YouTube and writes raw
         # YYYYMMDD as the date — fix it here using Median's curated metadata.
         am = _album_meta(metadata, title, artist)
-        write_tags(final_path, **am)
+        # A matched source carries the track number it had on *its own* upload,
+        # which has nothing to do with the song being saved here.
+        write_tags(final_path, **am,
+                   clear_track=metadata.get('platform') == 'spotify')
 
         if download_type == 'video' and ext == 'webm':
             await _warn(progress_callback, _WEBM_COVER_NOTE)
@@ -372,6 +389,180 @@ async def download_single(
         'title': title,
         'artist': artist,
     }
+
+
+async def _fetch_with_fallback(sources: list, ydl_opts: dict, label: str) -> bool:
+    """Fetch the first of `sources` that works, else re-raise the last error.
+
+    The error is re-raised rather than swallowed because callers upstream read
+    its text: `queue_manager` decides from the message whether a failure is
+    worth retrying at all, and a generic "no file produced" would make every
+    permanently-dead video look transient.
+
+    YouTube sporadically answers 403 on a perfectly healthy video because the
+    signed media URL it just issued is rejected. yt-dlp's own `retries` cannot
+    fix that — it re-requests the *same* dead URL — so each attempt here starts
+    a fresh extraction, which mints a new signature. Measured in practice: a
+    single such retry cleared every 403 seen, while yt-dlp's three internal
+    retries cleared none.
+
+    If a source stays broken, the ranked runner-up matches are tried instead,
+    so a stubborn video costs the album one track's quality rather than the
+    track itself.
+    """
+    import yt_dlp
+
+    loop = asyncio.get_running_loop()
+    attempts = max(1, settings.TRACK_DOWNLOAD_ATTEMPTS)
+    last_error = None
+
+    for source_index, url in enumerate(sources):
+        for attempt in range(1, attempts + 1):
+            def _dl(u=url, o=ydl_opts):
+                with yt_dlp.YoutubeDL(o) as ydl:
+                    ydl.download([u])
+            try:
+                await loop.run_in_executor(None, _dl)
+                if source_index or attempt > 1:
+                    app_logger.info(
+                        f"{label} succeeded on "
+                        f"{'fallback source ' + str(source_index + 1) if source_index else f'attempt {attempt}'}"
+                    )
+                return True
+            except Exception as e:
+                last_error = e
+                app_logger.warning(
+                    f"{label} source {source_index + 1} attempt {attempt} failed: {e}"
+                )
+                # A video that is gone will still be gone in two seconds —
+                # only retry when a fresh signature might actually help.
+                if _is_permanently_gone(e):
+                    break
+                if attempt < attempts:
+                    await asyncio.sleep(2 * attempt)
+
+    if last_error is not None:
+        raise last_error
+    return False
+
+
+# yt-dlp phrases the same condition several ways depending on where it was
+# detected — "Video unavailable", "This video is not available",
+# "This video is unavailable" — so match on the distinguishing fragments
+# rather than on any one full sentence.
+_GONE_MARKERS = (
+    'video unavailable', 'is not available', 'is unavailable',
+    'private video', 'members-only', 'removed by the uploader',
+    'has been terminated', 'sign in to confirm your age',
+    'requested format is not available', 'video has been removed',
+    'not made this video available',
+)
+
+
+def _is_permanently_gone(err: Exception) -> bool:
+    message = str(err).lower()
+    return any(marker in message for marker in _GONE_MARKERS)
+
+
+async def _download_each_track(
+    tracks: list,
+    album_folder: Path,
+    download_type: str,
+    fmt: str,
+    bitrate: str,
+    progress_callback: Optional[Callable],
+) -> list:
+    """Download an album whose tracks each come from a different source URL.
+
+    The normal album path hands yt-dlp one playlist URL and lets it walk the
+    entries. That only works when the album *is* a playlist somewhere. A
+    Spotify album isn't: every track has been matched to an unrelated YouTube
+    upload, so they have to be fetched one at a time.
+
+    Filenames are built from the known track list rather than yt-dlp's
+    `%(title)s`, which would otherwise stamp YouTube video titles
+    ("Artist - Song (Official Video) HD") onto an album's files.
+
+    Returns [(track, file_path)] for the tracks that succeeded, in album order.
+    """
+    import yt_dlp
+
+    loop = asyncio.get_running_loop()
+    total = len(tracks)
+    results = []
+    job_eta = JobEta()
+    # Longer songs take proportionally longer, so progress is measured in
+    # playing time rather than track count.
+    weights = TrackWeights(tracks)
+
+    for position, track in enumerate(tracks):
+        track_url = track.get('url') or ''
+        title = track.get('title') or f'Track {position + 1}'
+        if not track_url:
+            await _warn(
+                progress_callback,
+                f"No source found for \"{title}\" — skipped"
+            )
+            continue
+
+        if progress_callback:
+            done = weights.fraction(position)
+            await progress_callback(
+                done * 95,
+                f"Downloading track {position + 1}/{total}...",
+                eta=job_eta.remaining_text(done),
+            )
+
+        # Keep the track's own album position, so a partial selection still
+        # sorts correctly against the complete album.
+        number = int(track.get('index') or position + 1)
+        stem = str(album_folder / f"{number:03d} - {sanitize_filename(title)}")
+
+        # Report inside the current track as well as between tracks, so a long
+        # song doesn't leave the bar frozen and the estimate going stale.
+        def track_hook(d, _pos=position, _title=title):
+            if d.get('status') != 'downloading' or not progress_callback:
+                return
+            got = d.get('downloaded_bytes') or 0
+            want = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+            within = (got / want) if want else 0.0
+            done = weights.fraction(_pos, within)
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    progress_callback(
+                        done * 95,
+                        f"Downloading track {_pos + 1}/{total}...",
+                        speed=(d.get('_speed_str') or '').strip(),
+                        eta=job_eta.remaining_text(done),
+                    ),
+                    loop,
+                )
+
+        ydl_opts = get_ydl_opts(
+            download_type, 'mp3' if download_type == 'cover_audio' else fmt,
+            bitrate, stem + '.%(ext)s', track_hook,
+        )
+
+        sources = [track_url] + list(track.get('url_alternatives') or [])
+        try:
+            await _fetch_with_fallback(sources, ydl_opts, f"Track {number} ({title})")
+        except Exception:
+            # Already logged per attempt. One unobtainable track is reported
+            # below as a skip — it must not abandon the rest of the album.
+            pass
+
+        dl_ext = 'mp3' if download_type == 'cover_audio' else FORMAT_EXT_MAP.get(fmt, fmt)
+        found = (
+            find_any_media_file(stem)
+            if _keeps_original(download_type, bitrate)
+            else find_downloaded_file(stem, dl_ext)
+        )
+        if found:
+            results.append((track, found))
+        else:
+            await _warn(progress_callback, f"\"{title}\" failed to download — skipped")
+
+    return results
 
 
 async def download_playlist(
@@ -413,6 +604,13 @@ async def download_playlist(
                                  # onto the wrong songs
         downloaded_covers = []
 
+        # Estimates cover the download phase only. What follows — concatenating,
+        # and re-encoding if a crossfade was asked for — has no comparable unit
+        # of work to extrapolate from, so the figure is dropped there rather
+        # than invented.
+        job_eta = JobEta()
+        weights = TrackWeights(tracks)
+
         try:
             for i, track in enumerate(tracks):
                 track_url = track.get('url', '')
@@ -428,23 +626,42 @@ async def download_playlist(
                 if progress_callback:
                     await progress_callback(
                         pct_base,
-                        f"Downloading track {i+1}/{track_count}..."
+                        f"Downloading track {i+1}/{track_count}...",
+                        eta=job_eta.remaining_text(weights.fraction(i)),
                     )
 
                 temp_template = str(temp_dir / f"track_{i:03d}")
 
+                loop = asyncio.get_running_loop()
+
+                def merge_hook(d, _i=i):
+                    if d.get('status') != 'downloading' or not progress_callback:
+                        return
+                    got = d.get('downloaded_bytes') or 0
+                    want = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                    within = (got / want) if want else 0.0
+                    done = weights.fraction(_i, within)
+                    if loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            progress_callback(
+                                done * 70,
+                                f"Downloading track {_i + 1}/{track_count}...",
+                                speed=(d.get('_speed_str') or '').strip(),
+                                eta=job_eta.remaining_text(done),
+                            ),
+                            loop,
+                        )
+
                 if download_type == 'cover_audio':
                     ydl_opts = get_ydl_opts(
                         'cover_audio', 'mp3', bitrate,
-                        temp_template + '.%(ext)s'
+                        temp_template + '.%(ext)s', merge_hook
                     )
                 else:
                     ydl_opts = get_ydl_opts(
                         download_type, fmt, bitrate,
-                        temp_template + '.%(ext)s'
+                        temp_template + '.%(ext)s', merge_hook
                     )
-
-                loop = asyncio.get_running_loop()
 
                 def _dl(u=track_url, o=ydl_opts):
                     with yt_dlp.YoutubeDL(o) as ydl:
@@ -489,7 +706,9 @@ async def download_playlist(
                 )
 
             if progress_callback:
-                await progress_callback(75, "Concatenating...")
+                # Merging is CPU-bound and its duration doesn't follow from the
+                # download rate, so the estimate stops here rather than lying.
+                await progress_callback(75, "Merging tracks...", speed='', eta='')
 
             merge_bitrate = bitrate
             merge_ext = ext
@@ -566,7 +785,8 @@ async def download_playlist(
                 else:
                     # mp3/flac/m4a/mp4 all embed via mutagen; unsupported
                     # extensions are skipped inside write_tags.
-                    write_tags(str(output_path), **am, cover_path=merged_cover)
+                    write_tags(str(output_path), **am, cover_path=merged_cover,
+                               clear_track=metadata.get('platform') == 'spotify')
             if download_type == 'cover_audio':
                 _embed_mp4_cover(output_path, cover_file, am)
                 if out_ext == '.webm':
@@ -592,42 +812,73 @@ async def download_playlist(
         album_folder.mkdir(parents=True, exist_ok=True)
         _register_temp(download_id, 'partials', album_folder)
 
-        # With a partial selection, keep each track's original album position in
-        # the filename so picked tracks still sort alongside the rest of the
-        # album (autonumber would renumber them 1..N). Falls back to autonumber
-        # on platforms that don't report playlist_index.
-        number_field = (
-            '%(playlist_index,autonumber)03d' if selected_indices else '%(autonumber)03d'
-        )
-        ydl_opts = get_ydl_opts(download_type, fmt, bitrate,
-                                  str(album_folder / f'{number_field} - %(title)s.%(ext)s'))
-        if selected_indices:
-            # Tell yt-dlp to fetch only the ticked tracks rather than the album.
-            ydl_opts['playlist_items'] = ','.join(str(i) for i in selected_indices)
+        # Tracks matched one-by-one to unrelated sources (a Spotify album, whose
+        # songs each live on a different YouTube upload) have no single playlist
+        # URL to walk — they are fetched individually instead.
+        per_track = []
+        if metadata.get('per_track_urls'):
+            per_track = await _download_each_track(
+                tracks, album_folder, download_type, fmt, bitrate,
+                progress_callback,
+            )
+        else:
+            # With a partial selection, keep each track's original album position in
+            # the filename so picked tracks still sort alongside the rest of the
+            # album (autonumber would renumber them 1..N). Falls back to autonumber
+            # on platforms that don't report playlist_index.
+            number_field = (
+                '%(playlist_index,autonumber)03d' if selected_indices else '%(autonumber)03d'
+            )
+            ydl_opts = get_ydl_opts(download_type, fmt, bitrate,
+                                      str(album_folder / f'{number_field} - %(title)s.%(ext)s'))
+            if selected_indices:
+                # Tell yt-dlp to fetch only the ticked tracks rather than the album.
+                ydl_opts['playlist_items'] = ','.join(str(i) for i in selected_indices)
 
-        loop = asyncio.get_running_loop()
-        completed = [0]
+            loop = asyncio.get_running_loop()
+            completed = [0]
+            job_eta = JobEta()
+            weights = TrackWeights(tracks)
 
-        def hook(d):
-            if d['status'] == 'finished':
-                completed[0] += 1
-                pct = min(95, (completed[0] / max(track_count, 1)) * 95)
-                if progress_callback and loop.is_running():
+            def hook(d):
+                if not progress_callback or not loop.is_running():
+                    return
+                if d['status'] == 'downloading':
+                    # Progress within the track yt-dlp is on right now, added to
+                    # the tracks already finished — otherwise the bar sits still
+                    # for the whole of every song.
+                    got = d.get('downloaded_bytes') or 0
+                    want = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
+                    within = (got / want) if want else 0.0
+                    done = weights.fraction(completed[0], within)
                     asyncio.run_coroutine_threadsafe(
                         progress_callback(
-                            pct,
-                            f"Downloaded {completed[0]}/{track_count} tracks"
+                            min(95, done * 95),
+                            f"Downloading {completed[0] + 1}/{track_count} tracks",
+                            speed=(d.get('_speed_str') or '').strip(),
+                            eta=job_eta.remaining_text(done),
+                        ),
+                        loop
+                    )
+                elif d['status'] == 'finished':
+                    completed[0] += 1
+                    done = weights.fraction(completed[0])
+                    asyncio.run_coroutine_threadsafe(
+                        progress_callback(
+                            min(95, done * 95),
+                            f"Downloaded {completed[0]}/{track_count} tracks",
+                            eta=job_eta.remaining_text(done),
                         ),
                         loop
                     )
 
-        ydl_opts['progress_hooks'] = [hook]
+            ydl_opts['progress_hooks'] = [hook]
 
-        def _download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            def _download():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
 
-        await loop.run_in_executor(None, _download)
+            await loop.run_in_executor(None, _download)
 
         IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
@@ -737,16 +988,49 @@ async def download_playlist(
             # the playlist-level metadata.
             if download_type == 'audio':
                 AUDIO_TAG_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus'}
-                for audio_file in album_folder.iterdir():
-                    if audio_file.is_file() and audio_file.suffix.lower() in AUDIO_TAG_EXTS:
-                        # Leave title and artist alone — yt-dlp populated them
-                        # per-track. We just fill in the missing album-level fields.
+                if per_track:
+                    # Every tag on these files came from a YouTube upload that
+                    # merely sounds like the song: the title would read
+                    # "Artist - Song (Official Video)" and the cover would be a
+                    # frame of that video. Replace the lot with what the album
+                    # actually is — this is the whole point of routing through
+                    # a source that knows the real tracklist.
+                    cover = await _resolve_cover_file(
+                        None, [], metadata.get('thumbnail', ''),
+                        str(album_folder / '_album_cover.jpg'),
+                    )
+                    for track, track_path in per_track:
                         write_tags(
-                            str(audio_file),
+                            track_path,
+                            title=track.get('title', ''),
+                            artist=track.get('artist') or artist,
                             album=album,
                             year=metadata.get('year', '') or '',
                             genre=metadata.get('genre', '') or '',
+                            cover_path=cover,
+                            track=int(track.get('index') or 0),
+                            # The album's real length, not how many of it was
+                            # ticked — "5/3" would be nonsense.
+                            track_total=int(
+                                metadata.get('album_track_count') or track_count
+                            ),
                         )
+                    if cover and os.path.exists(cover):
+                        try:
+                            os.remove(cover)
+                        except OSError:
+                            pass
+                else:
+                    for audio_file in album_folder.iterdir():
+                        if audio_file.is_file() and audio_file.suffix.lower() in AUDIO_TAG_EXTS:
+                            # Leave title and artist alone — yt-dlp populated them
+                            # per-track. We just fill in the missing album-level fields.
+                            write_tags(
+                                str(audio_file),
+                                album=album,
+                                year=metadata.get('year', '') or '',
+                                genre=metadata.get('genre', '') or '',
+                            )
 
         MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm',
                       '.ogg', '.opus'}

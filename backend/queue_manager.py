@@ -22,7 +22,11 @@ UPDATABLE_COLUMNS = frozenset({
 # transient (network, expired URL, HTTP 416 from a stale range) and retried.
 PERMANENT_ERROR_MARKERS = (
     'cover image not found',
+    # yt-dlp words this three different ways depending on where it noticed:
+    # "Video unavailable", "This video is not available", "... is unavailable".
     'video unavailable',
+    'is not available',
+    'is unavailable',
     'private video',
     'members-only',
     'sign in to confirm your age',
@@ -134,6 +138,11 @@ def update_download_status(
         updates['lyrics'] = json.dumps(lyrics)
     if status == 'completed':
         updates["completed_at"] = "datetime('now')"
+    if status in ('completed', 'error', 'cancelled', 'cleaned'):
+        # Nothing is still being estimated once the job has stopped — leaving
+        # the last figure behind would show "2m 30s left" next to "Done".
+        updates['speed'] = ''
+        updates['eta'] = ''
 
     for col in updates:
         if col != "completed_at" and col not in UPDATABLE_COLUMNS and col != 'status':
@@ -160,11 +169,15 @@ def update_download_status(
         db.close()
 
     if download_id in download_states:
-        download_states[download_id].update({
+        state = download_states[download_id]
+        # Read speed/eta back out of `updates` rather than the parameters, so
+        # the deliberate blanking a terminal status performs above is mirrored
+        # here too — `speed or existing` would quietly keep the stale value.
+        state.update({
             'status': status,
-            'progress': progress if progress is not None else download_states[download_id].get('progress', 0),
-            'speed': speed or download_states[download_id].get('speed', ''),
-            'eta': eta or download_states[download_id].get('eta', ''),
+            'progress': progress if progress is not None else state.get('progress', 0),
+            'speed': updates.get('speed', speed or state.get('speed', '')),
+            'eta': updates.get('eta', eta or state.get('eta', '')),
         })
 
 
@@ -230,6 +243,105 @@ async def _resolve_pending_metadata(download_id: str, url: str, placeholder: dic
     return fresh
 
 
+async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
+    """Point each track at the YouTube upload that actually carries its audio.
+
+    Spotify metadata says what the music is but not where to get it, so every
+    track needs a search. That happens here — in the queue, inside the download
+    semaphore — rather than at validation time, so pasting a link stays instant
+    and a 50-track album doesn't time out an HTTP request.
+
+    Returns (metadata, download_url). Tracks that can't be found anywhere are
+    dropped with a visible note rather than failing the whole album.
+    """
+    from backend.utils.yt_match import match_all, match_track
+
+    async def warn(message: str):
+        if progress_callback:
+            await progress_callback(None, '', warning=message)
+
+    if not metadata.get('is_playlist'):
+        title = metadata.get('title', '')
+        match = await match_track(
+            title, metadata.get('artist', ''), int(metadata.get('duration') or 0)
+        )
+        if not match:
+            raise RuntimeError(
+                f'Couldn\'t find "{title}" on YouTube. Spotify\'s own audio is '
+                'copy-protected, so Median needs the song to exist there too.'
+            )
+        if not match.is_confident:
+            await warn(
+                f'"{title}" may be the wrong version — closest match was '
+                f'"{match.title}". Check before keeping it.'
+            )
+        app_logger.info(f"Matched {title!r} -> {match.url} ({match.confidence:.2f})")
+        metadata = dict(metadata)
+        metadata['url_alternatives'] = match.alternatives
+        return metadata, match.url
+
+    tracks = metadata.get('tracks') or []
+    if not tracks:
+        raise RuntimeError("That Spotify link has no tracks to download.")
+
+    total = len(tracks)
+
+    async def on_progress(done, count, _track, _match):
+        if progress_callback:
+            await progress_callback(
+                (done / max(count, 1)) * 5,   # matching is the first 5% of the job
+                f"Finding tracks on YouTube... {done}/{total}",
+            )
+
+    matches = await match_all(tracks, on_progress=on_progress)
+
+    resolved, missing, shaky = [], [], []
+    for track, match in zip(tracks, matches):
+        title = track.get('title', '')
+        if not match:
+            missing.append(title)
+            continue
+        found = dict(track)
+        found['url'] = match.url
+        # Somewhere to go if this upload turns out to be undownloadable.
+        found['url_alternatives'] = match.alternatives
+        resolved.append(found)
+        if not match.is_confident:
+            shaky.append(f'"{title}" (matched "{match.title}")')
+
+    if not resolved:
+        raise RuntimeError(
+            "None of these tracks could be found on YouTube. Spotify's own "
+            "audio is copy-protected, so Median can only fetch songs that "
+            "exist there too."
+        )
+
+    if missing:
+        await warn(
+            f"{len(missing)} track(s) couldn't be found on YouTube and were "
+            f"skipped: {', '.join(missing[:5])}"
+            + ("..." if len(missing) > 5 else "")
+        )
+    if shaky:
+        await warn(
+            f"{len(shaky)} track(s) may be the wrong version: "
+            f"{'; '.join(shaky[:3])}" + ("..." if len(shaky) > 3 else "")
+        )
+
+    metadata = dict(metadata)
+    metadata['tracks'] = resolved
+    metadata['track_count'] = len(resolved)
+    metadata['total_duration'] = sum((t.get('duration') or 0) for t in resolved)
+    # Tells the downloader to fetch these one at a time: they are unrelated
+    # uploads, not entries of one playlist it can hand to yt-dlp wholesale.
+    metadata['per_track_urls'] = True
+    app_logger.info(
+        f"Matched {len(resolved)}/{total} tracks "
+        f"({len(shaky)} low confidence, {len(missing)} missing)"
+    )
+    return metadata, url
+
+
 async def process_download(download_id: str, download_params: dict):
     async with _get_semaphore():
         url = download_params['url']
@@ -260,16 +372,25 @@ async def process_download(download_id: str, download_params: dict):
             'warnings': [],
         }
 
-        async def progress_callback(pct: float, message: str = '', warning: str = None):
+        async def progress_callback(pct: float, message: str = '', warning: str = None,
+                                    speed: str = None, eta: str = None):
+            state = download_states[download_id]
             if warning:
-                download_states[download_id].setdefault('warnings', []).append(warning)
+                state.setdefault('warnings', []).append(warning)
             if pct is None:
                 return
-            download_states[download_id]['progress'] = pct
-            download_states[download_id]['message'] = message
-            last = download_states[download_id].get('_last_db_pct', -1)
+            state['progress'] = pct
+            state['message'] = message
+            # Only overwrite when the caller actually has a figure — a phase
+            # that can't estimate (converting, tagging) passes None, and the
+            # last known value is better than blanking the display.
+            if speed is not None:
+                state['speed'] = speed
+            if eta is not None:
+                state['eta'] = eta
+            last = state.get('_last_db_pct', -1)
             if pct - last >= 5:
-                download_states[download_id]['_last_db_pct'] = pct
+                state['_last_db_pct'] = pct
                 # Skip DB write if task was already cancelled/cleaned externally
                 db_chk = get_db()
                 try:
@@ -282,7 +403,8 @@ async def process_download(download_id: str, download_params: dict):
                     db_chk.close()
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
-                    None, update_download_status, download_id, 'downloading', pct
+                    None, update_download_status, download_id, 'downloading', pct,
+                    state.get('speed', ''), state.get('eta', ''),
                 )
             app_logger.debug(f"[{download_id[:8]}] {pct:.0f}% - {message}")
 
@@ -301,12 +423,26 @@ async def process_download(download_id: str, download_params: dict):
                     'message': '',
                 })
 
+            # Spotify links carry no downloadable audio — resolve each track to
+            # the YouTube upload that does before anything is fetched.
+            download_url = url
+            if metadata.get('needs_yt_match'):
+                download_states[download_id]['message'] = 'Finding tracks on YouTube...'
+                metadata, download_url = await _resolve_spotify_matches(
+                    metadata, url, progress_callback
+                )
+                download_params['metadata'] = metadata
+                download_states[download_id].update({
+                    'total_tracks': metadata.get('track_count', 0),
+                    'message': '',
+                })
+
             is_playlist = metadata.get('is_playlist', False)
 
             async def _attempt():
                 if is_playlist:
                     return await download_playlist(
-                        url, download_type, fmt, bitrate, metadata,
+                        download_url, download_type, fmt, bitrate, metadata,
                         concatenate=concatenate,
                         progress_callback=progress_callback,
                         cover_settings=cover_settings,
@@ -317,7 +453,7 @@ async def process_download(download_id: str, download_params: dict):
                         selected_indices=selected_indices,
                     )
                 return await download_single(
-                    url, download_type, fmt, bitrate, metadata,
+                    download_url, download_type, fmt, bitrate, metadata,
                     progress_callback=progress_callback,
                     cover_settings=cover_settings,
                     cover_id=cover_id,
