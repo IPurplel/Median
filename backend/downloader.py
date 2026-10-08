@@ -384,8 +384,12 @@ async def download_single(
 
         # Don't delete an uploaded cover — it may be re-used; only delete yt-dlp
         # temp files and URL-fetched fallback covers (which have the temp_template stem).
+        # The thumbnail yt-dlp fetched is a temp file too, and goes unused
+        # when an uploaded cover wins — it used to be left behind as an orphan.
         cover_is_uploaded = cover_id and cover_file and str(CUSTOM_COVER_DIR) in cover_file
-        for tmp_f in [downloaded_file] + ([] if cover_is_uploaded else [cover_file]):
+        temp_files = [downloaded_file] + ([] if cover_is_uploaded else [cover_file])
+        temp_files += [c for c in local_candidates if c and Path(c).name.startswith(stem)]
+        for tmp_f in dict.fromkeys(temp_files):
             if tmp_f and os.path.exists(tmp_f):
                 try:
                     os.remove(tmp_f)
@@ -971,6 +975,8 @@ async def download_playlist(
             job_eta = JobEta()
             weights = TrackWeights(tracks)
 
+            finished_ids = set()
+
             def hook(d):
                 if not progress_callback or not loop.is_running():
                     return
@@ -992,6 +998,14 @@ async def download_playlist(
                         loop
                     )
                 elif d['status'] == 'finished':
+                    # yt-dlp reports 'finished' once per downloaded format, and
+                    # a video track is two (video + audio) — counting events
+                    # showed "Downloaded 4/2 tracks" and overran the bar.
+                    info = d.get('info_dict') or {}
+                    key = info.get('id') or info.get('webpage_url') or d.get('filename')
+                    if key in finished_ids:
+                        return
+                    finished_ids.add(key)
                     completed[0] += 1
                     done = weights.fraction(completed[0])
                     asyncio.run_coroutine_threadsafe(

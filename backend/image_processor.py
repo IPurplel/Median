@@ -53,6 +53,34 @@ def upgrade_thumbnail_url(url: str) -> str:
     return url
 
 
+_YTIMG_RE = re.compile(
+    r'^https?://i\d*\.ytimg\.com/(?:vi|vi_webp)/([\w-]{6,})/[^/?#]+$'
+)
+
+
+def thumbnail_candidates(url: str) -> list:
+    """`url` plus smaller fallbacks to try if it 404s.
+
+    yt-dlp reports YouTube's `maxresdefault` as the best thumbnail without
+    checking it exists, and older or low-resolution videos don't have one —
+    the preview showed a broken image and cover art fell back to nothing.
+    `hqdefault.jpg` exists for every video.
+    """
+    url = upgrade_thumbnail_url(url)
+    if not url:
+        return []
+    m = _YTIMG_RE.match(url)
+    if not m:
+        return [url]
+    base = f"https://i.ytimg.com/vi/{m.group(1)}"
+    out = [url]
+    for name in ('maxresdefault.jpg', 'sddefault.jpg', 'hqdefault.jpg'):
+        candidate = f"{base}/{name}"
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
 def parse_ratio(ratio_str: str) -> Tuple[int, int]:
     if ':' in ratio_str:
         parts = ratio_str.split(':')
@@ -287,17 +315,17 @@ def _center_crop(img, target_w: int, target_h: int):
 async def download_cover_image(url: str, dest_path: str) -> Optional[str]:
     import aiohttp
 
-    url = upgrade_thumbnail_url(url)
-
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
+            for candidate in thumbnail_candidates(url):
+                async with session.get(candidate, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        continue
                     content_type = resp.headers.get('Content-Type', '').split(';')[0].strip()
                     if content_type and not content_type.startswith('image/'):
                         app_logger.warning(
                             f"Cover download returned non-image content-type "
-                            f"{content_type!r} for {url}"
+                            f"{content_type!r} for {candidate}"
                         )
                         return None
                     with open(dest_path, 'wb') as f:

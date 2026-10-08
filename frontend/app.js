@@ -121,7 +121,7 @@ function loadPanel(id) {
 
 // ── Platform detection (live) ─────────────────────────────────────────────────
 const PATTERNS = {
-  youtube:    /(?:youtube\.com\/(?:watch|playlist|@|channel)|youtu\.be\/)/i,
+  youtube:    /(?:youtube\.com\/(?:watch|playlist|@|channel|shorts|live|embed|browse)|youtu\.be\/)/i,
   soundcloud: /soundcloud\.com\//i,
   bandcamp:   /\.bandcamp\.com\//i,
   spotify:    /(?:open\.)?spotify\.com\/(?:intl-\w+\/)?(?:track|album|playlist|artist)\/|^spotify:(?:track|album|playlist|artist):/i,

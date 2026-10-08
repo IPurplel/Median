@@ -6,7 +6,7 @@
 **Audit date:** `2026-10-07`  
 **Verification date:** `2026-10-07`  
 **Total bugs:** 22  
-**Status:** 22 `Fixed` (working tree, 2026-10-08) — none `Verified` yet; see [Fix Log](#fix-log--2026-10-08)
+**Status:** 22 original IDs fixed (10 `Verified`, 12 `Fixed`) plus 9 new IDs found in end-to-end testing; see [Fix Log](#fix-log--2026-10-08) and [End-to-End Pass](#end-to-end-pass--2026-10-08)
 
 ---
 
@@ -27,47 +27,47 @@
 |---|---|---|---|---|---|---|
 | `CORE-001` | High | P1 | YouTube runtime / Docker | Container is missing the JavaScript challenge stack required for reliable current YouTube extraction | `Fixed` | [Independent verification](#independent-verification-pass--2026-10-07) |
 | `BE-001` | High | P1 | Spotify -> YouTube matching | YouTube extractor failures are misreported as "song not found" | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `CORE-002` | High | P1 | Dependency lifecycle | yt-dlp update logic does not match the way yt-dlp is installed in the container | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
+| `CORE-002` | High | P1 | Dependency lifecycle | yt-dlp update logic does not match the way yt-dlp is installed in the container | `Verified` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
 | `BE-002` | High | P1 | Spotify album download / concatenate | Concatenated Spotify downloads bypass the normal retry and fallback-source path | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `FE-001` | High | P1 | Frontend / Authentication | Enabling `MEDIAN_API_TOKEN` breaks protected UI actions because the frontend never sends the bearer token | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `SEC-001` | High | P1 | API Authentication | Several mutating endpoints are not protected by the configured API token | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
+| `FE-001` | High | P1 | Frontend / Authentication | Enabling `MEDIAN_API_TOKEN` breaks protected UI actions because the frontend never sends the bearer token | `Verified` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
+| `SEC-001` | High | P1 | API Authentication | Several mutating endpoints are not protected by the configured API token | `Verified` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
 | `SEC-002` | High | P1 | Rate limiting / Proxy trust | Rate limiting can be bypassed by spoofing `X-Forwarded-For` | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
 | `SEC-003` | High | P1 | Cover uploads / Resource limits | Cover upload size is checked only after the whole request body is read | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `BE-003` | Critical | P0 | Download storage / Data integrity | Separate-track downloads of the same album reuse the same folder and can collide | `Fixed` | [P0 Fix Plan](#p0-fix-first-critical) |
+| `BE-003` | Critical | P0 | Download storage / Data integrity | Separate-track downloads of the same album reuse the same folder and can collide | `Verified` | [P0 Fix Plan](#p0-fix-first-critical) |
 | `BE-004` | High | P1 | Spotify fallback / Partial files | Fallback YouTube sources can reuse partial files created by a different source | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `BE-005` | High | P1 | YouTube video format selection | MP4 selector asks for `bestaudio[ext=mp4]` instead of M4A and can fall back to lower-quality combined formats | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
-| `CORE-003` | High | P1 | Cancellation / Executor lifecycle | Cancelling a download does not stop the running yt-dlp executor thread | `Fixed` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
+| `BE-005` | High | P1 | YouTube video format selection | MP4 selector asks for `bestaudio[ext=mp4]` instead of M4A and can fall back to lower-quality combined formats | `Verified` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
+| `CORE-003` | High | P1 | Cancellation / Executor lifecycle | Cancelling a download does not stop the running yt-dlp executor thread | `Verified` | [P1 Fix Plan](#p1-high-priority-fix-plans) |
 
-| `BE-006` | Critical | P0 | Video concatenation | WebM merge path uses H.264 + AAC inside a `.webm` output | `Fixed` | [P0 Fix Plan](#p0-fix-first-critical) |
-| `BE-007` | Medium | P2 | Video concatenation / Chapters | Merged video playlists do not get chapter markers | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
+| `BE-006` | Critical | P0 | Video concatenation | WebM merge path uses H.264 + AAC inside a `.webm` output | `Verified` | [P0 Fix Plan](#p0-fix-first-critical) |
+| `BE-007` | Medium | P2 | Video concatenation / Chapters | Merged video playlists do not get chapter markers | `Verified` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `BE-008` | Medium | P2 | Audio concatenation / Chapters | Chapter embedding failure can be ignored while the download is still marked successful | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `FE-002` | Medium | P2 | Frontend / Error reporting | Real download error text is lost while the download state is still in memory | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `CORE-004` | Medium | P2 | Startup script | `startup.sh` does not read `PORT` from `.env` before probing the health endpoint | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `BE-009` | Medium | P2 | Backup system | Two backups created in the same second can share one path | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
-| `BE-011` | Medium | P2 | Custom covers | Uploaded custom covers have no cleanup, TTL, quota, or delete path | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
+| `BE-011` | Medium | P2 | Custom covers | Uploaded custom covers have no cleanup, TTL, quota, or delete path | `Verified` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `API-001` | Medium | P2 | Request validation | API accepts incompatible `download_type` + `format` combinations | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `CORE-005` | Low | P3 | Startup script | Cleanup interval display includes the inline .env comment | `Fixed` | [P3 Fix Plan](#p3-low-priority-fix-plans) |
-| `BE-010` | Low | P3 | Backup API | Backup selection parameter is accepted but ignored | `Fixed` | [P3 Fix Plan](#p3-low-priority-fix-plans) |
+| `BE-010` | Low | P3 | Backup API | Backup selection parameter is accepted but ignored | `Verified` | [P3 Fix Plan](#p3-low-priority-fix-plans) |
 
 
-| `BE-011` | Medium | P2 | Custom covers | Uploaded custom covers have no cleanup, TTL, quota, or delete path | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
+| `BE-011` | Medium | P2 | Custom covers | Uploaded custom covers have no cleanup, TTL, quota, or delete path | `Verified` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 | `API-001` | Medium | P2 | Request validation | API accepts incompatible `download_type` + `format` combinations | `Fixed` | [P2 Fix Plan](#p2-medium-priority-fix-plans) |
 
 | Bug ID | Severity | Priority | Area | Title | Status |
 |---|---|---|---|---|---|
 | `CORE-001` | Critical | P0 | YouTube runtime / Docker | Container is missing the JavaScript challenge stack required for reliable current YouTube extraction | `Fixed` |
 | `BE-001` | High | P1 | Spotify -> YouTube matching | YouTube extractor failures are misreported as "song not found" | `Fixed` |
-| `CORE-002` | High | P1 | Dependency lifecycle | yt-dlp update logic does not match the way yt-dlp is installed in the container | `Fixed` |
+| `CORE-002` | High | P1 | Dependency lifecycle | yt-dlp update logic does not match the way yt-dlp is installed in the container | `Verified` |
 | `BE-002` | High | P1 | Spotify album download / concatenate | Concatenated Spotify downloads bypass the normal retry and fallback-source path | `Fixed` |
-| `FE-001` | High | P1 | Frontend / Authentication | Enabling `MEDIAN_API_TOKEN` breaks protected UI actions because the frontend never sends the bearer token | `Fixed` |
-| `SEC-001` | High | P1 | API Authentication | Several mutating endpoints are not protected by the configured API token | `Fixed` |
+| `FE-001` | High | P1 | Frontend / Authentication | Enabling `MEDIAN_API_TOKEN` breaks protected UI actions because the frontend never sends the bearer token | `Verified` |
+| `SEC-001` | High | P1 | API Authentication | Several mutating endpoints are not protected by the configured API token | `Verified` |
 | `SEC-002` | High | P1 | Rate limiting / Proxy trust | Rate limiting can be bypassed by spoofing `X-Forwarded-For` | `Fixed` |
 | `SEC-003` | High | P1 | Cover uploads / Resource limits | Cover upload size is checked only after the whole request body is read | `Fixed` |
-| `BE-003` | Critical | P0 | Download storage / Data integrity | Separate-track downloads of the same album reuse the same folder and can collide | `Fixed` |
+| `BE-003` | Critical | P0 | Download storage / Data integrity | Separate-track downloads of the same album reuse the same folder and can collide | `Verified` |
 | `BE-004` | High | P1 | Spotify fallback / Partial files | Fallback YouTube sources can reuse partial files created by a different source | `Fixed` |
-| `BE-005` | High | P1 | YouTube video format selection | MP4 selector asks for `bestaudio[ext=mp4]` instead of M4A and can fall back to lower-quality combined formats | `Fixed` |
-| `BE-006` | Critical | P0 | Video concatenation | WebM merge path uses H.264 + AAC inside a `.webm` output | `Fixed` |
-| `BE-007` | Medium | P2 | Video concatenation / Chapters | Merged video playlists do not get chapter markers | `Fixed` |
+| `BE-005` | High | P1 | YouTube video format selection | MP4 selector asks for `bestaudio[ext=mp4]` instead of M4A and can fall back to lower-quality combined formats | `Verified` |
+| `BE-006` | Critical | P0 | Video concatenation | WebM merge path uses H.264 + AAC inside a `.webm` output | `Verified` |
+| `BE-007` | Medium | P2 | Video concatenation / Chapters | Merged video playlists do not get chapter markers | `Verified` |
 | `BE-008` | Medium | P2 | Audio concatenation / Chapters | Chapter embedding failure can be ignored while the download is still marked successful | `Fixed` |
 ---
 
@@ -675,4 +675,57 @@ real YouTube/Spotify download, or ffmpeg merge was run.
 - Cancel a large download mid-transfer and confirm network/disk activity stops.
 - With `MEDIAN_API_TOKEN` set: UI prompts once, then download/cancel/keep/cover upload work.
 - `startup.sh` with `PORT=9090` in `.env`.
+
+---
+
+## End-to-End Pass — 2026-10-08
+
+Median was run for real (uvicorn, Python 3.11 with the pinned requirements,
+ffmpeg 7.0.2, deno 2.9) and driven over the API and in headless Chromium
+against live YouTube, YouTube Music, Spotify, SoundCloud and Bandcamp. Not a
+Docker build — the image itself is still unverified.
+
+### Moved to `Verified` (observed working in a real flow)
+
+| Bug ID | Evidence |
+|---|---|
+| `CORE-003` | Cancelled a 4K download mid-transfer at 37 MiB/s: partial deleted, no further disk growth over 16 s |
+| `BE-003` | Three downloads of one playlist landed in `…`, `… (1)`, `… (2)` |
+| `BE-005` | MP4 downloads carry AAC audio from the m4a stream |
+| `BE-006` | WebM merge (hard cut and crossfade) → VP9 + Opus, plays, correct length |
+| `BE-007` | Merged MP4/MKV/WebM have 3 chapters; crossfaded ones shift by the overlap |
+| `FE-001` | With `MEDIAN_API_TOKEN` set the UI prompted once, then validate/download/panels worked |
+| `SEC-001` | Real HTTP: mutating calls 401 without the token, succeed with it |
+| `BE-010` | UI backup create/download/delete without `selection` |
+| `BE-011` | Cover upload/preview/delete; cover+audio with an uploaded cover |
+| `CORE-002` | Server starts without self-update; health reports yt-dlp version |
+
+### New bugs found and fixed
+
+| Bug ID | Severity | Area | Title | Fix | Status |
+|---|---|---|---|---|---|
+| `BE-012` | Critical | Audio concatenation | Merged FLAC albums lose audio after the first track (stream-copied FLAC keeps only the first STREAMINFO; decoding stopped at 16 s of 36 s) | Hard-cut merge re-encodes FLAC (lossless) | `Verified` |
+| `BE-013` | Medium | Chapters | FLAC merges never get chapters — ffmpeg's FLAC muxer drops them while reporting success | Chapters written as `CHAPTERxxx` Vorbis comments via mutagen | `Verified` |
+| `BE-014` | Medium | Thumbnails / covers | YouTube `maxresdefault` thumbnail 404s for older/low-res videos: broken preview image (502) and no fallback cover | `thumbnail_candidates()` walks maxres → sd → hq in proxy and cover download | `Verified` |
+| `BE-015` | Low | Cover+audio | Using an uploaded cover left yt-dlp's thumbnail behind as an orphan `_tmp_*.jpg` | Unused fetched thumbnails deleted | `Verified` |
+| `BE-016` | High | Discography | Bandcamp discography empty for artists on the classic "indexpage" layout (yt-dlp extractor returns 0 entries); the empty result was then cached for 6 h | Scrape `/music` HTML (same artist host only) when yt-dlp finds nothing; empty results not cached | `Verified` |
+| `BE-017` | Low | Progress | Separate-track video playlists showed "Downloaded 4/2 tracks" — yt-dlp fires `finished` per format | Count each video id once | `Fixed` |
+| `BE-018` | Medium | Video format | MP4 downloads picked AV1 video, which many TVs/phones/QuickTime can't play | Prefer `avc1` (H.264), AV1/other MP4 as fallback | `Verified` |
+| `CORE-006` | High | Docker | `apk add deno` fails on 32-bit ARM (not packaged), failing the whole image build | deno installed in its own non-fatal step; health reports it missing | `Fixed` |
+| `API-002` | High | URL validation | YouTube Music, `m.youtube.com`, Shorts/live/embed, `?…&v=` links and `m.`/`on.soundcloud.com` links rejected as "Platform not supported" | Broadened platform patterns (backend + UI badge) | `Verified` |
+
+### Checked and found working
+
+Single downloads in mp3/flac/aac/original and mp4/mkv/webm; playlist
+separate, merged, crossfaded (audio and video), cover+audio single/merged;
+Spotify track, album, playlist (per-track YouTube matching); SoundCloud track
+and set; Bandcamp track and albums; discography on Bandcamp, YouTube and
+SoundCloud; batch zip; backups; keep; cleanup; history filters; SSE events;
+description.md; restart recovery; theme/help/panels in the UI with no console
+errors.
+
+Not bugs: MP3 CHAP frames appear out of order in ffprobe, but the CTOC frame
+orders them correctly (what players use); batch-zip filenames drop the
+`001 -` prefix by design (files carry track tags); discography mode ignores a
+per-track selection by design (UI locks it).
 

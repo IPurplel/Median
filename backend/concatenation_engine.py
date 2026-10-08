@@ -206,6 +206,15 @@ async def _run_hardcut_audio(loop, input_files, output_path):
     try:
         _write_concat_manifest(input_files, manifest_path)
 
+        # FLAC can't be stream-copied through the concat demuxer: every file
+        # carries its own STREAMINFO header (total samples, MD5), the copy
+        # keeps only the first, and decoders stop partway into track two.
+        # Re-encoding FLAC is lossless, so it costs time, not quality.
+        if Path(output_path).suffix.lower() == '.flac':
+            codec_args = ['-map', '0:a', '-c:a', 'flac']
+        else:
+            codec_args = ['-c', 'copy']
+
         def _concat():
             # -map_chapters -1 drops chapters inherited from the first source
             # track (e.g. YouTube video chapters); the album's own chapter
@@ -213,7 +222,7 @@ async def _run_hardcut_audio(loop, input_files, output_path):
             return run_ffmpeg([
                 '-f', 'concat', '-safe', '0',
                 '-i', manifest_path,
-                '-c', 'copy',
+                *codec_args,
                 '-map_chapters', '-1',
                 '-y', output_path
             ], timeout=settings.CONCAT_AUDIO_TIMEOUT)

@@ -190,7 +190,10 @@ def test_mp4_selector_pairs_mp4_video_with_m4a_audio():
     for bitrate in ('', '192'):
         selector = get_ydl_opts('video', 'mp4', bitrate, 'x.%(ext)s')['format']
         assert 'bestaudio[ext=mp4]' not in selector
-        assert selector.split('/')[0].startswith('bestvideo[ext=mp4]+bestaudio[ext=m4a]')
+        first = selector.split('/')[0]
+        assert first.startswith('bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]')
+        # AV1/other MP4 video is still a fallback, ahead of progressive formats
+        assert 'bestvideo[ext=mp4]+bestaudio[ext=m4a]' in selector
 
 
 # ── BE-006: WebM merges use WebM codecs ──────────────────────────────────────
@@ -468,3 +471,120 @@ def test_error_text_is_exposed_under_error_message(tmp_path, monkeypatch):
         assert queue_manager.get_download_status(did)['error_message'] == 'HTTP 403'
     finally:
         queue_manager.download_states.pop(did, None)
+
+
+# ── Found in end-to-end testing (2026-10-08) ─────────────────────────────────
+
+def test_flac_hardcut_merge_reencodes_instead_of_stream_copying(tmp_path, monkeypatch):
+    """Stream-copied FLAC keeps only the first file's STREAMINFO header;
+    decoders stopped partway into track two."""
+    seen = {}
+
+    def fake_ffmpeg(args, timeout=None):
+        seen['args'] = args
+        Path(args[-1]).write_bytes(b'x')
+        return 0, '', ''
+    monkeypatch.setattr(ce, 'run_ffmpeg', fake_ffmpeg)
+
+    for ext, expect in (('flac', ['-c:a', 'flac']), ('mp3', ['-c', 'copy'])):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                ce._run_hardcut_audio(loop, ['a', 'b'], str(tmp_path / f'out.{ext}')))
+        finally:
+            loop.close()
+        args = seen['args']
+        assert any(args[i:i + 2] == expect for i in range(len(args))), (ext, args)
+
+
+def test_flac_chapters_are_written_as_vorbis_comments(tmp_path, monkeypatch):
+    """ffmpeg's FLAC muxer drops chapters silently; they go in as
+    CHAPTERxxx comments instead."""
+    from backend import ffmpeg_chapters_handler as fch
+
+    written = {}
+
+    class FakeFLAC(dict):
+        def __init__(self, path):
+            super().__init__()
+            self.tags = self
+
+        def save(self):
+            written.update(self)
+    import mutagen.flac
+    monkeypatch.setattr(mutagen.flac, 'FLAC', FakeFLAC)
+
+    tracks = [{'title': 'One', 'duration': 61.5}, {'title': 'Two', 'duration': 10}]
+    assert fch.add_chapters_to_file(str(tmp_path / 'a.flac'), tracks) is True
+    assert written == {
+        'CHAPTER001': '00:00:00.000', 'CHAPTER001NAME': 'One',
+        'CHAPTER002': '00:01:01.500', 'CHAPTER002NAME': 'Two',
+    }
+
+
+def test_youtube_thumbnails_fall_back_to_ones_that_exist():
+    from backend.image_processor import thumbnail_candidates
+
+    c = thumbnail_candidates('https://i.ytimg.com/vi_webp/jNQXAC9IVRw/maxresdefault.webp')
+    assert c[0].endswith('maxresdefault.webp')
+    assert c[-1] == 'https://i.ytimg.com/vi/jNQXAC9IVRw/hqdefault.jpg'
+    assert thumbnail_candidates('https://f4.bcbits.com/img/a1_10.jpg') == \
+        ['https://f4.bcbits.com/img/a1_0.jpg']
+    assert thumbnail_candidates('') == []
+
+
+_CLASSIC_BANDCAMP = '''
+<div class="ipCell"><div class="ipCellImage"><a href="/album/antm"><img/></a></div>
+<div class="ipCellLabel"><div class="ipCellLabel1"><a href="/album/antm">ANTM</a></div></div></div>
+<div class="ipCell"><div class="ipCellLabel1"><a href="/album/terra-damnata">Terra &amp; Damnata</a></div></div>
+<a href="https://label.bandcamp.com/album/someone-else">Other artist</a>
+'''
+
+
+def test_classic_bandcamp_layout_yields_albums():
+    """yt-dlp's Bandcamp user extractor returns nothing for the classic
+    indexpage layout, so the discography came back empty."""
+    from backend.discography import _bandcamp_entries_from_html
+
+    entries = _bandcamp_entries_from_html('https://artist.bandcamp.com/music', _CLASSIC_BANDCAMP)
+    assert entries == [
+        {'url': 'https://artist.bandcamp.com/album/antm', 'title': 'ANTM'},
+        {'url': 'https://artist.bandcamp.com/album/terra-damnata', 'title': 'Terra & Damnata'},
+    ]
+
+
+def test_empty_discography_is_not_cached(monkeypatch):
+    from backend import discography
+
+    async def nothing(page):
+        return []
+
+    async def no_html(page):
+        return ''
+    stored = []
+    monkeypatch.setattr(discography, '_flat_entries', nothing)
+    monkeypatch.setattr(discography, '_fetch_page', no_html)
+    monkeypatch.setattr(discography.metadata_cache, 'get', lambda k: None)
+    monkeypatch.setattr(discography.metadata_cache, 'set', lambda *a, **k: stored.append(a))
+
+    result = asyncio.run(discography.resolve_discography('https://a.bandcamp.com/album/x'))
+    assert result['albums'] == [] and stored == []
+
+
+@pytest.mark.parametrize('url,platform,playlist', [
+    ('https://music.youtube.com/watch?v=jNQXAC9IVRw', 'youtube', False),
+    ('https://m.youtube.com/watch?v=jNQXAC9IVRw', 'youtube', False),
+    ('https://www.youtube.com/watch?app=desktop&v=jNQXAC9IVRw', 'youtube', False),
+    ('https://youtube.com/shorts/Y3wF1czl9GY', 'youtube', False),
+    ('https://music.youtube.com/playlist?list=OLAK5uy_abc', 'youtube', True),
+    ('https://music.youtube.com/browse/MPREb_abc', 'youtube', True),
+    ('https://on.soundcloud.com/AbC12', 'soundcloud', False),
+    ('https://m.soundcloud.com/ethmusic/track', 'soundcloud', False),
+    ('https://example.com/youtube.com/watch?v=x', None, False),
+])
+def test_share_link_variants_are_recognised(url, platform, playlist):
+    """Mobile, YouTube Music, Shorts and reordered-query links were rejected
+    as 'Platform not supported'."""
+    from backend.utils.validators import detect_platform, is_playlist_url
+    assert detect_platform(url) == platform
+    assert is_playlist_url(url) == playlist

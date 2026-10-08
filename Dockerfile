@@ -15,15 +15,20 @@ FROM python:3.11-alpine
 LABEL maintainer="Median Audio Downloader"
 LABEL description="Self-hosted audio downloader for YouTube, SoundCloud, Bandcamp"
 
-# System deps (deno provides the JS runtime yt-dlp needs for YouTube
-# signature challenges; installed system-wide so the median user can run it)
+# System deps
 RUN apk add --no-cache \
     ffmpeg \
     curl \
     ca-certificates \
     tzdata \
-    deno \
     && rm -rf /var/cache/apk/*
+
+# deno is the JS runtime yt-dlp needs for YouTube signature challenges,
+# installed system-wide so the median user can run it. Alpine only packages it
+# for x86_64 and aarch64 — on 32-bit ARM the build continues without it and
+# /api/health reports youtube_challenges_ok: false instead of failing here.
+RUN apk add --no-cache deno \
+    || echo "WARNING: deno is not packaged for $(uname -m); YouTube downloads may fail"
 
 # Copy installed Python packages from builder
 COPY --from=builder /install /usr/local

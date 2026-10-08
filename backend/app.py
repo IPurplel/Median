@@ -2043,12 +2043,25 @@ async def thumbnail_proxy(url: str = Query(...), request: Request = None):
         session = _http_session
         if not session:
             raise HTTPException(503, "Service not ready")
-        async with session.get(
-            url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-            allow_redirects=True,
-        ) as resp:
+        from backend.image_processor import thumbnail_candidates
+        # YouTube's advertised maxres thumbnail often doesn't exist; walk
+        # down to one that does instead of showing a broken image.
+        candidates = [
+            c for c in thumbnail_candidates(url)
+            if urlparse(c).netloc in ALLOWED_THUMBNAIL_HOSTS
+        ] or [url]
+        for i, candidate in enumerate(candidates):
+            resp = await session.get(
+                candidate,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=True,
+            )
+            if resp.status == 404 and i + 1 < len(candidates):
+                resp.release()
+                continue
+            break
+        async with resp:
             if resp.status != 200:
                 app_logger.warning(f"Thumbnail proxy: upstream {resp.status} for {url}")
                 raise HTTPException(502, f"Could not load thumbnail (upstream: {resp.status})")

@@ -98,10 +98,15 @@ def get_ydl_opts(
             # audio-only streams as m4a, so `bestaudio[ext=mp4]` matches no
             # audio-only candidate and silently drops the whole selection to a
             # combined progressive MP4 of usually worse quality (BE-005).
+            # H.264 first: `bestvideo[ext=mp4]` alone now picks YouTube's AV1
+            # stream, which many TVs, older phones and QuickTime can't play —
+            # people choose MP4 for "plays everywhere". Any MP4 video is the
+            # fallback when no H.264 stream exists; MKV keeps the best codec.
+            avc = 'bestvideo[ext=mp4][vcodec^=avc1]'
             if bitrate_val:
-                opts['format'] = f'bestvideo[ext=mp4]+bestaudio[ext=m4a][abr<={bitrate_val}]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
+                opts['format'] = f'{avc}+bestaudio[ext=m4a][abr<={bitrate_val}]/{avc}+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
             else:
-                opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
+                opts['format'] = f'{avc}+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
             opts['merge_output_format'] = 'mp4'
 
         # Embed the thumbnail as cover art: mp4 carries it in the covr atom,
