@@ -6,7 +6,7 @@
 **Audit date:** `2026-10-07`  
 **Verification date:** `2026-10-07`  
 **Total bugs:** 22  
-**Status:** 22 original IDs fixed (10 `Verified`, 12 `Fixed`) plus 9 new IDs found in end-to-end testing; see [Fix Log](#fix-log--2026-10-08) and [End-to-End Pass](#end-to-end-pass--2026-10-08)
+**Status:** 22 original IDs fixed (10 `Verified`, 12 `Fixed`) plus 9 new IDs found in end-to-end testing; see [Fix Log](#fix-log--2026-10-08) and [End-to-End Pass](#end-to-end-pass--2026-10-08). A second bug hunt added 15 IDs (14 fixed, 1 open); see [Second Bug Hunt](#second-bug-hunt--2026-10-08)
 
 ---
 
@@ -728,4 +728,36 @@ Not bugs: MP3 CHAP frames appear out of order in ffprobe, but the CTOC frame
 orders them correctly (what players use); batch-zip filenames drop the
 `001 -` prefix by design (files carry track tags); discography mode ignores a
 per-track selection by design (UI locks it).
+
+---
+
+## Second Bug Hunt — 2026-10-08
+
+Code read end to end on top of `9df535e` (PR #3). Each candidate was traced
+through its code path at least twice and, where reading alone could not
+settle it, checked against the yt-dlp source or by running ffmpeg. Fix commit:
+`4b83463` on `fix/bug-hunt-2`. Full suite: 327 passed; 12 of the 13 new tests
+fail on the pre-fix code (the BE-029 test only fails on a non-UTC machine).
+
+| Bug ID | Severity | Area | Title | Fix | Regression test | Status |
+|---|---|---|---|---|---|---|
+| `BE-019` | High | Queue / Cancel | Cancelling a download that is still queued leaves it `queued` forever: the cancel lands while waiting for the semaphore, outside the handler that settles it. It stays in `/api/queue`, keeps its discography batch from finishing (no zip button after a refresh, never released by `release_stale_batches`), and blocks the "unrecognised files" cleanup until restart | `process_download` settles a cancel received while waiting; the job body moved to `_run_download` | `test_cancel_while_queued_settles_the_download` | `Verified` — real server, one slot: queued download cancelled → `cancelled`, gone from the queue, `active_downloads` back to 0 |
+| `BE-020` | High | Playlist download | A separate-track playlist fails entirely when one video is private, deleted or region-locked — yt-dlp used as a library raises on the first bad entry unless `ignoreerrors` is set (its CLI defaults to `only_download`) | `ignoreerrors='only_download'` with an error-collecting logger; skipped tracks reported as a warning; yt-dlp's own reason raised if nothing downloaded | `test_one_bad_playlist_entry_no_longer_fails_the_album` | `Fixed` (no live playlist with a dead entry was at hand) |
+| `BE-021` | High | Storage | A failed or retried separate-track album leaves its finished tracks on disk forever: only `.part`/`.ytdl` were cleaned, the retry reserves a new `(1)` folder, and nothing records the first | Album folder registered as a temp `dir` until the download succeeds | `test_failed_album_folder_is_removed_by_partial_cleanup` | `Fixed` |
+| `BE-022` | High | Video merge | Merged WebM playlists over ~3 min fail: VP9 re-encode at ~0.3× real time against a fixed 600 s timeout; every hard-cut video merge re-encoded | Identical inputs stream-copied; VP9 `-deadline realtime -cpu-used 8 -row-mt 1`; merge timeouts scale with total duration | `test_identical_inputs_are_joined_without_reencoding`, `test_stream_copy_rules`, `test_webm_reencode_uses_fast_vp9_settings_and_timeouts_scale` | `Verified` — 3-video, 597 s WebM merge finished in ~20 s with 3 chapters |
+| `BE-023` | Medium | Progress | Merge progress jumped 75% → 10% → 80% and said "Complete" before tagging | Engine progress scaled into 75–99%; completion message set by the queue | `test_merge_progress_is_scaled_and_never_says_complete_early` | `Verified` — crossfade merge went 70% → 77.4% "Crossfading video…" |
+| `BE-024` | Medium | Cancel / ffmpeg | Cancelling during a merge left ffmpeg encoding (up to 30 min) and its output in the downloads root with no record | `run_ffmpeg` tracks processes; cleanup kills ffmpeg touching a cancelled job's paths and blocks new runs on them; merge outputs registered as temp until success | `test_cancel_kills_a_running_ffmpeg_and_blocks_new_ones` | `Verified` — cancel mid-crossfade: ffmpeg gone, partial `.mp4` removed |
+| `BE-025` | Medium | Playlist download | `MAX_PLAYLIST_TRACKS` not applied to separate-track downloads (metadata capped, yt-dlp given the full playlist) | `playlistend` set when no explicit selection | `test_one_bad_playlist_entry_no_longer_fails_the_album` | `Fixed` |
+| `FE-003` | Medium | Frontend | The page froze after ~6 downloads: one EventSource each, and HTTP/1.1 allows 6 connections per host | One shared poll of `/api/downloads/status` for all single downloads | — (browser) | `Verified` — headless Chromium, 8 downloads: `/api/queue` answered instantly; old frontend hung past an 8 s abort |
+| `SEC-004` | Medium | API validation | `/api/download` skipped `validate_url`, so any URL (including internal hosts) reached yt-dlp's generic extractor | Same validation as `/api/validate` | `test_download_rejects_unsupported_urls` | `Verified` — real server: `http://127.0.0.1…` → 400 |
+| `BE-026` | Low | Chapters / Tags | Chapter pass used `-map_metadata 1` from a tag-less FFMETADATA file, wiping artist/album/title on merged cover+audio MKV/WebM | `-map_metadata 0` | `test_chapter_pass_keeps_the_files_metadata` | `Verified` — ffprobe of merged cover+audio MKV shows ARTIST/ALBUM and 2 chapters |
+| `BE-027` | Low | Backups | Full backups included `.cover_cache/` (up to 500 MB) and in-flight `_concat_*` temp files — the filter checked only file names | Every path part checked for a leading `.`/`_` | `test_full_backup_skips_cover_cache_and_temp_dirs` | `Fixed` |
+| `BE-028` | Low | Storage | Two downloads of the same artist/title got the same output name (chosen before the download, written at the end); the second overwrote the first and both records shared one file | `reserve_unique_file()` claims the name with `O_CREAT|O_EXCL` right before writing | `test_concurrent_file_reservations_are_all_unique` | `Fixed` |
+| `BE-029` | Low | Statistics | 7-day activity labels used local time against UTC rows; with `TZ` set, late-evening downloads landed on the wrong day | Labels built in UTC | `test_activity_labels_are_utc_dates` | `Fixed` |
+| `BE-030` | Low | Chapters / Covers | Found while verifying BE-026: the chapter pass kept only one video stream, dropping the cover attachment (a second mjpeg stream) from merged cover+audio MKV | `-map 0` in the chapter pass | `test_chapter_pass_keeps_the_files_metadata` | `Verified` — merged cover+audio MKV keeps `cover.jpg` |
+| `BE-031` | Low | Cancel / Storage | After a cancel, yt-dlp's worker thread can still write a thumbnail or first `.part` chunk just after the per-download cleanup ran, leaving `_tmp_*` / `_concat_*` leftovers until the stale-partial sweep (up to ~1.5 h). Seen twice in this pass | — | — | `Confirmed` |
+
+Ruled out: MKV cover attachments surviving the chapter pass looked fine when
+tested on piped input, but piping turns the attachment into a lone video
+stream — on a real file it was dropped (filed as BE-030).
 

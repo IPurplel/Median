@@ -5,7 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from backend.utils.ffmpeg_handler import (
-    run_ffmpeg, get_media_duration, validate_media_file, get_video_dimensions
+    run_ffmpeg, get_media_duration, validate_media_file, get_video_dimensions,
+    get_stream_signature,
 )
 from backend.ffmpeg_chapters_handler import add_chapters_to_file, generate_ffmpeg_metadata
 from backend.image_processor import process_cover_image
@@ -44,6 +45,10 @@ def _merge_video_codecs(output_format: str, *, reencoded: bool) -> List[str]:
         return [
             '-c:v', _vp9_encoder(),
             '-b:v', '0', '-crf', str(settings.VIDEO_CRF),
+            # libvpx's default "good, cpu-used 0" encodes 1080p at ~0.3x real
+            # time, so any merge past ~3 minutes hit the timeout (BE-022).
+            # Realtime/cpu-used 8 with row threading runs ~8x real time.
+            '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1',
             '-c:a', 'libopus', '-b:a', settings.AUDIO_BITRATE_DEFAULT,
         ]
     args = ['-c:v', settings.VIDEO_CODEC_H264, '-preset', settings.VIDEO_PRESET]
@@ -53,6 +58,46 @@ def _merge_video_codecs(output_format: str, *, reencoded: bool) -> List[str]:
     if reencoded:
         args += ['-b:a', settings.AUDIO_BITRATE_DEFAULT]
     return args
+
+
+# Containers and the codecs each can take as a straight stream copy. MKV takes
+# anything; the others only what their spec allows.
+_COPY_CODECS = {
+    'mp4': ({'h264', 'hevc', 'av1'}, {'aac', 'mp3'}),
+    'webm': ({'vp8', 'vp9', 'av1'}, {'opus', 'vorbis'}),
+}
+
+
+def _can_stream_copy(signatures, output_format: str) -> bool:
+    """True when every input has identical streams the container can hold.
+
+    The hard-cut merge used to re-encode every time, which made long merges
+    overrun the timeout (BE-022); identical inputs can simply be joined.
+    """
+    if not signatures or any(sig is None for sig in signatures):
+        return False
+    if len(set(signatures)) != 1:
+        return False
+    fmt = (output_format or 'mp4').lower().lstrip('.')
+    if fmt == 'mkv':
+        return True
+    allowed = _COPY_CODECS.get(fmt)
+    if not allowed:
+        return False
+    video_ok, audio_ok = allowed
+    for kind, codec, *_ in signatures[0]:
+        if codec not in (video_ok if kind == 'video' else audio_ok):
+            return False
+    return True
+
+
+def _scaled_timeout(base: int, total_seconds: float, per_second: float) -> int:
+    """A merge's timeout, grown with how much media it has to process.
+
+    A fixed limit fails long albums on slower machines however healthy the
+    encode is (BE-022); the configured value stays the floor.
+    """
+    return int(max(base, (total_seconds or 0) * per_second))
 
 
 def _crossfade_feasible(durations, crossfade_duration, max_tracks):
@@ -225,7 +270,11 @@ async def _run_hardcut_audio(loop, input_files, output_path):
                 *codec_args,
                 '-map_chapters', '-1',
                 '-y', output_path
-            ], timeout=settings.CONCAT_AUDIO_TIMEOUT)
+            ], timeout=_scaled_timeout(
+                # Probed here, in the worker thread, not on the event loop.
+                settings.CONCAT_AUDIO_TIMEOUT,
+                sum(_collect_durations(input_files)), 0.5,
+            ))
 
         code, _, stderr = await loop.run_in_executor(None, _concat)
         if code != 0:
@@ -250,7 +299,10 @@ async def _run_crossfade_audio(loop, input_files, output_path, crossfade_duratio
     args += ['-y', output_path]
 
     def _run():
-        return run_ffmpeg(args, timeout=settings.CONCAT_AUDIO_TIMEOUT)
+        timeout = _scaled_timeout(
+            settings.CONCAT_AUDIO_TIMEOUT, sum(_collect_durations(input_files)), 0.5
+        )
+        return run_ffmpeg(args, timeout=timeout)
 
     code, _, stderr = await loop.run_in_executor(None, _run)
     if code != 0:
@@ -412,8 +464,10 @@ async def _run_crossfade_video(loop, input_files, output_path, crossfade_duratio
         '-y', output_path,
     ]
 
+    timeout = _scaled_timeout(settings.CONCAT_VIDEO_TIMEOUT, sum(durations), 4)
+
     def _run():
-        return run_ffmpeg(args, timeout=settings.CONCAT_VIDEO_TIMEOUT)
+        return run_ffmpeg(args, timeout=timeout)
 
     code, _, stderr = await loop.run_in_executor(None, _run)
     if code != 0:
@@ -499,20 +553,47 @@ async def concatenate_video(
         if progress_callback:
             await progress_callback(10, "Concatenating video...")
 
-        def _concat():
+        def _probe():
+            return (
+                [get_stream_signature(f) for f in input_files],
+                _scaled_timeout(
+                    settings.CONCAT_VIDEO_TIMEOUT,
+                    sum(_collect_durations(input_files)), 4,
+                ),
+            )
+
+        signatures, reencode_timeout = await loop.run_in_executor(None, _probe)
+
+        def _concat(codec_args, timeout):
             return run_ffmpeg([
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', manifest_path,
-                # Container-appropriate codecs: the old unconditional H.264/AAC
-                # broke WebM merges (BE-006).
-                *_merge_video_codecs(output_format, reencoded=False),
+                *codec_args,
                 '-map_chapters', '-1',
                 '-y',
                 output_path
-            ], timeout=settings.CONCAT_VIDEO_TIMEOUT)
+            ], timeout=timeout)
 
-        code, _, stderr = await loop.run_in_executor(None, _concat)
+        code = None
+        if _can_stream_copy(signatures, output_format):
+            # Identical inputs join without re-encoding: seconds instead of
+            # a full encode, and no generational quality loss (BE-022).
+            code, _, stderr = await loop.run_in_executor(
+                None, _concat, ['-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy'],
+                settings.CONCAT_VIDEO_TIMEOUT,
+            )
+            if code != 0:
+                app_logger.warning(
+                    f"Video stream-copy concat failed, re-encoding: {stderr[-400:]}"
+                )
+        if code != 0:
+            # Container-appropriate codecs: the old unconditional H.264/AAC
+            # broke WebM merges (BE-006).
+            code, _, stderr = await loop.run_in_executor(
+                None, _concat, _merge_video_codecs(output_format, reencoded=False),
+                reencode_timeout,
+            )
 
         if code != 0:
             app_logger.error(f"Video concat error: {stderr}")
@@ -713,6 +794,8 @@ async def create_cover_audio_video(
                 args += [
                     '-c:v', vcodec,
                     '-b:v', '0', '-crf', str(settings.VIDEO_CRF),
+                    # Same speed settings as the video merge (BE-022).
+                    '-deadline', 'realtime', '-cpu-used', '8', '-row-mt', '1',
                     '-c:a', 'libopus',
                 ]
                 args += [

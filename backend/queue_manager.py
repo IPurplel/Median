@@ -379,217 +379,237 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
     return metadata, url
 
 
-async def process_download(download_id: str, download_params: dict):
-    async with _get_semaphore():
-        url = download_params['url']
-        download_type = download_params['download_type']
-        fmt = download_params['format']
-        bitrate = download_params.get('bitrate', '')
-        metadata = download_params['metadata']
-        concatenate = download_params.get('concatenate', False)
-        cover_settings = download_params.get('cover_settings')
-        cover_id = download_params.get('cover_id')
-        crossfade = download_params.get('crossfade', False)
-        crossfade_duration = download_params.get('crossfade_duration')
-        selected_indices = download_params.get('selected_indices')
+async def _run_download(download_id: str, download_params: dict):
+    url = download_params['url']
+    download_type = download_params['download_type']
+    fmt = download_params['format']
+    bitrate = download_params.get('bitrate', '')
+    metadata = download_params['metadata']
+    concatenate = download_params.get('concatenate', False)
+    cover_settings = download_params.get('cover_settings')
+    cover_id = download_params.get('cover_id')
+    crossfade = download_params.get('crossfade', False)
+    crossfade_duration = download_params.get('crossfade_duration')
+    selected_indices = download_params.get('selected_indices')
 
-        download_states[download_id] = {
-            'id': download_id,
-            'status': 'downloading',
-            'progress': 0,
-            'speed': '',
-            'eta': '',
-            'message': '',
-            'total_tracks': metadata.get('track_count', 0),
-            'is_playlist': bool(metadata.get('is_playlist')),
-            'is_concatenated': bool(concatenate),
-            'source': download_params.get('source', 'manual'),
-            'title': metadata.get('title', ''),
-            'artist': metadata.get('artist', ''),
-            'warnings': [],
-        }
+    download_states[download_id] = {
+        'id': download_id,
+        'status': 'downloading',
+        'progress': 0,
+        'speed': '',
+        'eta': '',
+        'message': '',
+        'total_tracks': metadata.get('track_count', 0),
+        'is_playlist': bool(metadata.get('is_playlist')),
+        'is_concatenated': bool(concatenate),
+        'source': download_params.get('source', 'manual'),
+        'title': metadata.get('title', ''),
+        'artist': metadata.get('artist', ''),
+        'warnings': [],
+    }
 
-        async def progress_callback(pct: float, message: str = '', warning: str = None,
-                                    speed: str = None, eta: str = None):
-            state = download_states[download_id]
-            if warning:
-                state.setdefault('warnings', []).append(warning)
-            if pct is None:
-                return
-            state['progress'] = pct
-            state['message'] = message
-            # Only overwrite when the caller actually has a figure — a phase
-            # that can't estimate (converting, tagging) passes None, and the
-            # last known value is better than blanking the display.
-            if speed is not None:
-                state['speed'] = speed
-            if eta is not None:
-                state['eta'] = eta
-            last = state.get('_last_db_pct', -1)
-            if pct - last >= 5:
-                state['_last_db_pct'] = pct
-                # Skip DB write if task was already cancelled/cleaned externally
-                db_chk = get_db()
-                try:
-                    row = db_chk.execute(
-                        "SELECT status FROM downloads WHERE id = ?", (download_id,)
-                    ).fetchone()
-                    if row and row['status'] in ('cancelled', 'cleaned', 'error'):
-                        return
-                finally:
-                    db_chk.close()
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None, update_download_status, download_id, 'downloading', pct,
-                    state.get('speed', ''), state.get('eta', ''),
-                )
-            app_logger.debug(f"[{download_id[:8]}] {pct:.0f}% - {message}")
+    async def progress_callback(pct: float, message: str = '', warning: str = None,
+                                speed: str = None, eta: str = None):
+        state = download_states[download_id]
+        if warning:
+            state.setdefault('warnings', []).append(warning)
+        if pct is None:
+            return
+        state['progress'] = pct
+        state['message'] = message
+        # Only overwrite when the caller actually has a figure — a phase
+        # that can't estimate (converting, tagging) passes None, and the
+        # last known value is better than blanking the display.
+        if speed is not None:
+            state['speed'] = speed
+        if eta is not None:
+            state['eta'] = eta
+        last = state.get('_last_db_pct', -1)
+        if pct - last >= 5:
+            state['_last_db_pct'] = pct
+            # Skip DB write if task was already cancelled/cleaned externally
+            db_chk = get_db()
+            try:
+                row = db_chk.execute(
+                    "SELECT status FROM downloads WHERE id = ?", (download_id,)
+                ).fetchone()
+                if row and row['status'] in ('cancelled', 'cleaned', 'error'):
+                    return
+            finally:
+                db_chk.close()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, update_download_status, download_id, 'downloading', pct,
+                state.get('speed', ''), state.get('eta', ''),
+            )
+        app_logger.debug(f"[{download_id[:8]}] {pct:.0f}% - {message}")
 
-        try:
-            update_download_status(download_id, 'downloading', progress=0)
+    try:
+        update_download_status(download_id, 'downloading', progress=0)
 
-            if metadata.get('needs_resolve'):
-                download_states[download_id]['message'] = 'Reading album details...'
-                metadata = await _resolve_pending_metadata(download_id, url, metadata)
-                download_params['metadata'] = metadata
-                download_states[download_id].update({
-                    'title': metadata.get('title', ''),
-                    'artist': metadata.get('artist', ''),
-                    'total_tracks': metadata.get('track_count', 0),
-                    'is_playlist': bool(metadata.get('is_playlist')),
-                    'message': '',
-                })
+        if metadata.get('needs_resolve'):
+            download_states[download_id]['message'] = 'Reading album details...'
+            metadata = await _resolve_pending_metadata(download_id, url, metadata)
+            download_params['metadata'] = metadata
+            download_states[download_id].update({
+                'title': metadata.get('title', ''),
+                'artist': metadata.get('artist', ''),
+                'total_tracks': metadata.get('track_count', 0),
+                'is_playlist': bool(metadata.get('is_playlist')),
+                'message': '',
+            })
 
-            # Spotify links carry no downloadable audio — resolve each track to
-            # the YouTube upload that does before anything is fetched.
-            download_url = url
-            if metadata.get('needs_yt_match'):
-                download_states[download_id]['message'] = 'Finding tracks on YouTube...'
-                metadata, download_url = await _resolve_spotify_matches(
-                    metadata, url, progress_callback
-                )
-                download_params['metadata'] = metadata
-                download_states[download_id].update({
-                    'total_tracks': metadata.get('track_count', 0),
-                    'message': '',
-                })
+        # Spotify links carry no downloadable audio — resolve each track to
+        # the YouTube upload that does before anything is fetched.
+        download_url = url
+        if metadata.get('needs_yt_match'):
+            download_states[download_id]['message'] = 'Finding tracks on YouTube...'
+            metadata, download_url = await _resolve_spotify_matches(
+                metadata, url, progress_callback
+            )
+            download_params['metadata'] = metadata
+            download_states[download_id].update({
+                'total_tracks': metadata.get('track_count', 0),
+                'message': '',
+            })
 
-            is_playlist = metadata.get('is_playlist', False)
+        is_playlist = metadata.get('is_playlist', False)
 
-            async def _attempt():
-                if is_playlist:
-                    return await download_playlist(
-                        download_url, download_type, fmt, bitrate, metadata,
-                        concatenate=concatenate,
-                        progress_callback=progress_callback,
-                        cover_settings=cover_settings,
-                        cover_id=cover_id,
-                        crossfade=crossfade,
-                        crossfade_duration=crossfade_duration,
-                        download_id=download_id,
-                        selected_indices=selected_indices,
-                    )
-                return await download_single(
+        async def _attempt():
+            if is_playlist:
+                return await download_playlist(
                     download_url, download_type, fmt, bitrate, metadata,
+                    concatenate=concatenate,
                     progress_callback=progress_callback,
                     cover_settings=cover_settings,
                     cover_id=cover_id,
+                    crossfade=crossfade,
+                    crossfade_duration=crossfade_duration,
                     download_id=download_id,
+                    selected_indices=selected_indices,
                 )
-
-            # One automatic fresh retry: transient failures (expired URLs,
-            # HTTP 416 from stale ranges, dropped connections) usually succeed
-            # on a clean second attempt. Partials are deleted between attempts
-            # so nothing stale gets resumed.
-            try:
-                result = await _attempt()
-            except asyncio.CancelledError:
-                raise
-            except Exception as first_err:
-                cleanup_partials(download_id)
-                if _is_permanent_error(first_err):
-                    raise
-                app_logger.warning(
-                    f"Download attempt failed [{download_id[:8]}]: {first_err} — retrying once"
-                )
-                # Rewind progress bookkeeping, otherwise _last_db_pct from the
-                # failed attempt suppresses DB writes until the retry passes it.
-                download_states[download_id].update({
-                    'progress': 0, 'speed': '', 'eta': '',
-                    'message': 'Retrying after a failed attempt...',
-                    '_last_db_pct': -1,
-                })
-                await asyncio.sleep(2)
-                result = await _attempt()
-
-            # Bandcamp publishes lyrics on each track page — fetch them for the
-            # description.md. Non-fatal, and only after the download itself.
-            lyrics = None
-            if metadata.get('platform') == 'bandcamp':
-                try:
-                    from backend.utils.lyrics_fetcher import fetch_bandcamp_lyrics
-                    loop = asyncio.get_running_loop()
-                    lyrics = await loop.run_in_executor(
-                        None, fetch_bandcamp_lyrics, metadata
-                    )
-                except Exception as e:
-                    app_logger.warning(f"Lyrics fetch failed (non-fatal): {e}")
-
-            # Embed the lyrics into the media tags too (USLT / ©lyr / LYRICS)
-            # so music players display them per song.
-            if lyrics and result.get('file_path'):
-                try:
-                    from backend.utils.tag_writer import embed_lyrics_into_download
-                    tagged = await loop.run_in_executor(
-                        None, embed_lyrics_into_download,
-                        result['file_path'], lyrics, bool(concatenate),
-                    )
-                    if tagged:
-                        app_logger.info(f"Lyrics embedded into {tagged} file(s)")
-                except Exception as e:
-                    app_logger.warning(f"Lyrics tag embed failed (non-fatal): {e}")
-
-            update_download_status(
-                download_id, 'completed',
-                progress=100,
-                file_path=result.get('file_path'),
-                file_size=result.get('file_size', 0),
-                warnings=download_states[download_id].get('warnings'),
-                lyrics=lyrics,
+            return await download_single(
+                download_url, download_type, fmt, bitrate, metadata,
+                progress_callback=progress_callback,
+                cover_settings=cover_settings,
+                cover_id=cover_id,
+                download_id=download_id,
             )
 
-            actual_fmt = fmt
-            if download_type == 'cover_audio':
-                actual_fmt = (cover_settings or {}).get('output_format', 'mp4')
-
-            _add_to_history(download_id, metadata, url, actual_fmt)
-
-            download_states[download_id]['status'] = 'completed'
-            download_states[download_id]['progress'] = 100
-            app_logger.info(f"Download complete: {download_id[:8]} - {metadata.get('title')}")
-
+        # One automatic fresh retry: transient failures (expired URLs,
+        # HTTP 416 from stale ranges, dropped connections) usually succeed
+        # on a clean second attempt. Partials are deleted between attempts
+        # so nothing stale gets resumed.
+        try:
+            result = await _attempt()
         except asyncio.CancelledError:
-            update_download_status(download_id, 'cancelled')
-            download_states[download_id]['status'] = 'cancelled'
-            app_logger.info(f"Download cancelled: {download_id[:8]}")
-            # The yt-dlp executor thread may still be writing; delete what's
-            # there now — the stale-partial sweep catches any late stragglers.
+            raise
+        except Exception as first_err:
             cleanup_partials(download_id)
-        except Exception as e:
-            error_msg = str(e)
-            cleanup_partials(download_id)
-            update_download_status(download_id, 'error', error_message=error_msg)
-            download_states[download_id]['status'] = 'error'
-            download_states[download_id]['error_message'] = error_msg
-            app_logger.error(f"Download error [{download_id[:8]}]: {error_msg}")
-        finally:
-            discard_temp_entries(download_id)
-            _clear_cancel(download_id)
-            if download_id in active_downloads:
-                del active_downloads[download_id]
-            t = asyncio.create_task(_deferred_state_cleanup(download_id))
-            _cleanup_tasks.add(t)
-            t.add_done_callback(_cleanup_tasks.discard)
+            if _is_permanent_error(first_err):
+                raise
+            app_logger.warning(
+                f"Download attempt failed [{download_id[:8]}]: {first_err} — retrying once"
+            )
+            # Rewind progress bookkeeping, otherwise _last_db_pct from the
+            # failed attempt suppresses DB writes until the retry passes it.
+            download_states[download_id].update({
+                'progress': 0, 'speed': '', 'eta': '',
+                'message': 'Retrying after a failed attempt...',
+                '_last_db_pct': -1,
+            })
+            await asyncio.sleep(2)
+            result = await _attempt()
+
+        # Bandcamp publishes lyrics on each track page — fetch them for the
+        # description.md. Non-fatal, and only after the download itself.
+        lyrics = None
+        if metadata.get('platform') == 'bandcamp':
+            try:
+                from backend.utils.lyrics_fetcher import fetch_bandcamp_lyrics
+                loop = asyncio.get_running_loop()
+                lyrics = await loop.run_in_executor(
+                    None, fetch_bandcamp_lyrics, metadata
+                )
+            except Exception as e:
+                app_logger.warning(f"Lyrics fetch failed (non-fatal): {e}")
+
+        # Embed the lyrics into the media tags too (USLT / ©lyr / LYRICS)
+        # so music players display them per song.
+        if lyrics and result.get('file_path'):
+            try:
+                from backend.utils.tag_writer import embed_lyrics_into_download
+                tagged = await loop.run_in_executor(
+                    None, embed_lyrics_into_download,
+                    result['file_path'], lyrics, bool(concatenate),
+                )
+                if tagged:
+                    app_logger.info(f"Lyrics embedded into {tagged} file(s)")
+            except Exception as e:
+                app_logger.warning(f"Lyrics tag embed failed (non-fatal): {e}")
+
+        update_download_status(
+            download_id, 'completed',
+            progress=100,
+            file_path=result.get('file_path'),
+            file_size=result.get('file_size', 0),
+            warnings=download_states[download_id].get('warnings'),
+            lyrics=lyrics,
+        )
+
+        actual_fmt = fmt
+        if download_type == 'cover_audio':
+            actual_fmt = (cover_settings or {}).get('output_format', 'mp4')
+
+        _add_to_history(download_id, metadata, url, actual_fmt)
+
+        download_states[download_id]['status'] = 'completed'
+        download_states[download_id]['progress'] = 100
+        download_states[download_id]['message'] = 'Complete'
+        app_logger.info(f"Download complete: {download_id[:8]} - {metadata.get('title')}")
+
+    except asyncio.CancelledError:
+        update_download_status(download_id, 'cancelled')
+        download_states[download_id]['status'] = 'cancelled'
+        app_logger.info(f"Download cancelled: {download_id[:8]}")
+        # The yt-dlp executor thread may still be writing; delete what's
+        # there now — the stale-partial sweep catches any late stragglers.
+        cleanup_partials(download_id)
+    except Exception as e:
+        error_msg = str(e)
+        cleanup_partials(download_id)
+        update_download_status(download_id, 'error', error_message=error_msg)
+        download_states[download_id]['status'] = 'error'
+        download_states[download_id]['error_message'] = error_msg
+        app_logger.error(f"Download error [{download_id[:8]}]: {error_msg}")
+    finally:
+        discard_temp_entries(download_id)
+        _clear_cancel(download_id)
+        if download_id in active_downloads:
+            del active_downloads[download_id]
+        t = asyncio.create_task(_deferred_state_cleanup(download_id))
+        _cleanup_tasks.add(t)
+        t.add_done_callback(_cleanup_tasks.discard)
+
+
+async def process_download(download_id: str, download_params: dict):
+    # Waiting for a slot sits outside _run_download's own cancel handling, so a
+    # download cancelled while still queued has to be settled here — otherwise
+    # it stays 'queued' and in active_downloads for good, which also holds its
+    # discography batch open forever (BE-019).
+    semaphore = _get_semaphore()
+    try:
+        await semaphore.acquire()
+    except asyncio.CancelledError:
+        update_download_status(download_id, 'cancelled')
+        _clear_cancel(download_id)
+        active_downloads.pop(download_id, None)
+        app_logger.info(f"Download cancelled before starting: {download_id[:8]}")
+        raise
+    try:
+        await _run_download(download_id, download_params)
+    finally:
+        semaphore.release()
 
 
 async def _deferred_state_cleanup(download_id: str, delay: int = 300):

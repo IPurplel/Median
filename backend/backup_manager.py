@@ -66,7 +66,11 @@ async def create_backup(
                         files_to_backup.append(f)
     elif download_dir.exists():
         for f in download_dir.rglob('*'):
-            if f.is_file() and not f.name.startswith('.') and not f.name.startswith('_'):
+            # Checked on every path part, not just the name: `.cover_cache/`
+            # (up to COVER_CACHE_MAX_MB of rendered covers) and an in-flight
+            # merge's `_concat_*/track_000.mp3` slipped through before (BE-027).
+            rel_parts = f.relative_to(download_dir).parts
+            if f.is_file() and not any(p.startswith(('.', '_')) for p in rel_parts):
                 files_to_backup.append(f)
 
     loop = asyncio.get_running_loop()
