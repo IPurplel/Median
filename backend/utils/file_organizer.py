@@ -50,6 +50,37 @@ def ensure_unique_path(base_path: Path) -> Path:
     )
 
 
+def reserve_playlist_folder(parent: Path, artist: str, album: str) -> Path:
+    """Atomically reserve a playlist folder under `parent` for this download.
+
+    Two separate-track downloads of the same album both name themselves
+    `Artist - Album`, so the deterministic name alone lets them share a
+    directory (BE-003). `mkdir(exist_ok=False)` is atomic on every platform
+    Python supports: exactly one caller can win a given path, and the loser
+    retries with a ` (N)` suffix. Existing folders are never reused, even
+    when they are empty — they may belong to a download that has not been
+    cleaned up yet, and mixing records into one directory breaks per-record
+    size accounting and cleanup.
+    """
+    base = get_playlist_folder(artist, album)
+    parent.mkdir(parents=True, exist_ok=True)
+
+    counter = 0
+    candidate = parent / base
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            counter += 1
+            if counter > _MAX_UNIQUE_ATTEMPTS:
+                raise RuntimeError(
+                    f"Could not reserve a unique folder for {base!r} "
+                    f"after {_MAX_UNIQUE_ATTEMPTS} attempts"
+                )
+            candidate = parent / f"{base} ({counter})"
+
+
 def format_file_size(size_bytes) -> str:
     if not size_bytes:
         return "0 B"

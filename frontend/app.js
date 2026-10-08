@@ -10,6 +10,7 @@ let currentBitrate = '320';
 let currentCoverSettings = { ratio: '1:1', resolution: 'original', output_format: 'mp4' };
 let currentCrossfade = { enabled: false, duration: 2.0 };
 let customCoverId = null;
+const submittedCoverIds = new Set();  // covers a queued download depends on
 let discography = null;   // { artist, albums: [...] } once resolved for this URL
 let discoLoading = false;
 let activePollers = {};  // download_id -> setInterval id (polling fallback)
@@ -38,10 +39,54 @@ function toast(msg, type = 'info', duration = 3500) {
 }
 
 // ── API helpers ───────────────────────────────────────────────────────────────
+// When the server sets MEDIAN_API_TOKEN, every mutating /api request needs
+// `Authorization: Bearer <token>`. The token is never shipped in this file:
+// the user is asked for it on the first 401 and it is kept in this browser
+// only. A rejected token is forgotten so the next attempt asks again (FE-001).
+const TOKEN_KEY = 'median_api_token';
+
+function getApiToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+
+function setApiToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (_) { /* storage blocked — token lasts for this request only */ }
+}
+
+let _sessionToken = '';
+
+function authHeaders() {
+  const token = getApiToken() || _sessionToken;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// fetch() that retries once with a user-supplied token after a 401.
+async function authFetch(url, opts = {}) {
+  const send = () => fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...authHeaders() } });
+  let res = await send();
+  if (res.status !== 401) return res;
+
+  setApiToken('');
+  _sessionToken = '';
+  const entered = (window.prompt('This Median instance requires an API token:') || '').trim();
+  if (!entered) return res;
+  _sessionToken = entered;
+  setApiToken(entered);
+  res = await send();
+  if (res.status === 401) {
+    setApiToken('');
+    _sessionToken = '';
+  }
+  return res;
+}
+
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(API + path, opts);
+  const res = await authFetch(API + path, opts);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
   return data;
@@ -76,7 +121,7 @@ function loadPanel(id) {
 
 // ── Platform detection (live) ─────────────────────────────────────────────────
 const PATTERNS = {
-  youtube:    /(?:youtube\.com\/(?:watch|playlist|@|channel)|youtu\.be\/)/i,
+  youtube:    /(?:youtube\.com\/(?:watch|playlist|@|channel|shorts|live|embed|browse)|youtu\.be\/)/i,
   soundcloud: /soundcloud\.com\//i,
   bandcamp:   /\.bandcamp\.com\//i,
   spotify:    /(?:open\.)?spotify\.com\/(?:intl-\w+\/)?(?:track|album|playlist|artist)\/|^spotify:(?:track|album|playlist|artist):/i,
@@ -628,7 +673,7 @@ $('#cover-file-input').addEventListener('change', async (e) => {
   form.append('file', file);
 
   try {
-    const res = await fetch('/api/cover/upload', { method: 'POST', body: form });
+    const res = await authFetch('/api/cover/upload', { method: 'POST', body: form });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || 'Upload failed');
 
@@ -649,6 +694,11 @@ $('#cover-file-input').addEventListener('change', async (e) => {
 });
 
 $('#btn-clear-cover').addEventListener('click', () => {
+  // Free the upload on the server unless a queued download still needs it —
+  // those are swept by the server's cover TTL instead (BE-011).
+  if (customCoverId && !submittedCoverIds.has(customCoverId)) {
+    api('DELETE', `/api/cover/upload/${customCoverId}`).catch(() => {});
+  }
   customCoverId = null;
   $('#custom-cover-name').textContent = '';
   $('#btn-clear-cover').classList.add('hidden');
@@ -714,6 +764,8 @@ async function startDownload() {
       cover_id: currentDownloadType === 'cover_audio' ? customCoverId : null,
       include_description: $('#description-toggle')?.checked || false,
     };
+
+    if (body.cover_id) submittedCoverIds.add(body.cover_id);
 
     // Only send a track selection when it's actually partial — everything
     // ticked is just a normal album download.
@@ -1467,7 +1519,7 @@ async function loadBackup() {
 async function createBackup() {
   try {
     toast('Creating backup…', 'info');
-    const result = await api('POST', '/api/backup', { selection: 'all' });
+    const result = await api('POST', '/api/backup', {});
     toast(`Backup created: ${result.filename} (${fmtSize(result.size)})`, 'success');
     loadBackup();
   } catch (err) {

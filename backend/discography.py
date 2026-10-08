@@ -173,6 +173,12 @@ _BC_HREF_RE = re.compile(r'href="([^"]+)"')
 _BC_TITLE_RE = re.compile(r'<p class="title"[^>]*>(.*?)</p>', re.S)
 _BC_ARTIST_SPAN_RE = re.compile(r'<span class="artist-override".*?</span>', re.S)
 _TAG_RE = re.compile(r'<[^>]+>')
+# Classic "indexpage" layout, which some artists still use instead of the
+# music grid: <div class="ipCellLabel1"><a href="/album/x">Title</a></div>
+_BC_IPCELL_RE = re.compile(
+    r'class="ipCellLabel1"[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', re.S
+)
+_BC_ALBUM_HREF_RE = re.compile(r'href="((?:https?://[\w.-]+)?/album/[^"?#]+)')
 
 
 def _album_path(url: str) -> str:
@@ -199,6 +205,11 @@ def _bandcamp_titles(page_html: str) -> dict:
         if title:
             titles[_album_path(href.group(1))] = title
 
+    for href, raw in _BC_IPCELL_RE.findall(page_html):
+        title = ' '.join(html_mod.unescape(_TAG_RE.sub(' ', raw)).split())
+        if title:
+            titles.setdefault(_album_path(href), title)
+
     blob = _BC_CLIENT_ITEMS_RE.search(page_html)
     if blob:
         try:
@@ -212,13 +223,9 @@ def _bandcamp_titles(page_html: str) -> dict:
     return titles
 
 
-async def _enrich_bandcamp_titles(page_url: str, albums: list) -> None:
-    """Replace guessed slug titles with the real ones. Best-effort: on any
-    failure the albums keep their slug titles and stay downloadable."""
+async def _fetch_page(page_url: str) -> str:
+    """GET a page's HTML, or '' on any failure."""
     import urllib.request
-
-    if not any(a['title_is_guess'] for a in albums):
-        return
 
     def _fetch():
         try:
@@ -228,11 +235,48 @@ async def _enrich_bandcamp_titles(page_url: str, albums: list) -> None:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return resp.read().decode('utf-8', 'replace')
         except Exception as exc:
-            app_logger.debug(f"Bandcamp title fetch failed for {page_url}: {exc}")
+            app_logger.debug(f"Bandcamp page fetch failed for {page_url}: {exc}")
             return ''
 
     loop = asyncio.get_running_loop()
-    page_html = await loop.run_in_executor(None, _fetch)
+    return await loop.run_in_executor(None, _fetch)
+
+
+def _bandcamp_entries_from_html(page_url: str, page_html: str) -> list:
+    """Album entries scraped straight from a /music page.
+
+    yt-dlp's Bandcamp user extractor only understands the music-grid layout;
+    on the classic "indexpage" layout it returns no entries at all, so the
+    discography came back empty for those artists.
+    """
+    from urllib.parse import urljoin
+
+    try:
+        titles = _bandcamp_titles(page_html)
+    except Exception:
+        titles = {}
+    host = urlparse(page_url).netloc.lower()
+    entries, seen = [], set()
+    for href in _BC_ALBUM_HREF_RE.findall(page_html):
+        url = urljoin(page_url, href)
+        # Label/recommendation blocks link other artists' albums.
+        if urlparse(url).netloc.lower() != host:
+            continue
+        path = _album_path(url)
+        if path in seen:
+            continue
+        seen.add(path)
+        entries.append({'url': url, 'title': titles.get(path, '')})
+    return entries
+
+
+async def _enrich_bandcamp_titles(page_url: str, albums: list) -> None:
+    """Replace guessed slug titles with the real ones. Best-effort: on any
+    failure the albums keep their slug titles and stay downloadable."""
+    if not any(a['title_is_guess'] for a in albums):
+        return
+
+    page_html = await _fetch_page(page_url)
     if not page_html:
         return
 
@@ -351,6 +395,12 @@ async def resolve_discography(
     for page in pages:
         entries = await _flat_entries(page)
         albums = _entries_to_albums(entries, platform)
+        if not albums and platform == 'bandcamp':
+            page_html = await _fetch_page(page)
+            if page_html:
+                albums = _entries_to_albums(
+                    _bandcamp_entries_from_html(page, page_html), platform
+                )
         if albums:
             if platform == 'bandcamp':
                 await _enrich_bandcamp_titles(page, albums)
@@ -359,7 +409,10 @@ async def resolve_discography(
             break
 
     if not result['albums']:
+        # Not cached: an empty listing is as likely a transient fetch failure
+        # as a one-album artist, and caching it hid the discography for hours.
         result['note'] = "No other albums found on this artist's page."
+        return result
 
     metadata_cache.set(cache_key, result, ttl=_CACHE_TTL)
     return result

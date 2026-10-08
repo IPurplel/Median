@@ -12,7 +12,6 @@ from backend.logger import app_logger
 
 
 async def create_backup(
-    selection: str = 'all',
     date_from: Optional[str] = None,
     date_to: Optional[str] = None
 ) -> dict:
@@ -21,7 +20,10 @@ async def create_backup(
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    archive_name = f"median_backup_{timestamp}.zip"
+    # A second-resolution stamp alone lets two backups started in the same
+    # second target one path — the second overwrites the first while both DB
+    # rows point at it, and deleting either removes the shared file (BE-009).
+    archive_name = f"median_backup_{timestamp}_{backup_id[:8]}.zip"
     archive_path = backup_dir / archive_name
 
     download_dir = Path(settings.UPLOAD_FOLDER)

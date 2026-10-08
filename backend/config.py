@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     LOG_FOLDER: str = "/app/logs"
     DATABASE_PATH: str = "/app/database/median.db"
     CUSTOM_COVER_DIR: str = "/tmp/median_covers"
+    # Uploaded covers are reusable across downloads, so they are not deleted
+    # when one finishes — instead anything older than this is swept. Long
+    # enough to outlive any realistic queue wait for the download using it.
+    COVER_UPLOAD_TTL_HOURS: int = 24
 
     MAX_UPLOAD_SIZE_MB: int = 20
     MAX_URL_LENGTH: int = 2048
@@ -59,6 +63,8 @@ class Settings(BaseSettings):
     # and two times this value. Long enough that a multi-album batch finishes
     # before its first album expires.
     CLEANUP_INTERVAL: int = 90
+    # Unused: yt-dlp is updated by rebuilding the image, never inside a running
+    # container (CORE-002). Kept so existing .env files still load.
     AUTO_UPDATE_INTERVAL: int = 48
     DOWNLOAD_CHUNK_SIZE: int = 5
     LOG_BACKUP_COUNT: int = 7

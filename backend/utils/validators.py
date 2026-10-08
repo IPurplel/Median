@@ -5,17 +5,23 @@ from typing import Optional, Tuple
 
 
 PLATFORM_PATTERNS = {
+    # Mobile (m.) and YouTube Music share links were rejected as "platform
+    # not supported", as were watch links whose v= isn't the first parameter
+    # (?app=desktop&v=…, ?feature=share&v=…) and Shorts/live/embed URLs.
     "youtube": [
-        r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=[\w-]+",
-        r"(?:https?://)?(?:www\.)?youtube\.com/playlist\?list=[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.|music\.)?youtube\.com/watch\?(?:[^#]*&)?v=[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.|music\.)?youtube\.com/playlist\?(?:[^#]*&)?list=[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?youtube\.com/(?:shorts|live|embed)/[\w-]+",
+        r"(?:https?://)?music\.youtube\.com/browse/[\w-]+",
         r"(?:https?://)?youtu\.be/[\w-]+",
-        r"(?:https?://)?(?:www\.)?youtube\.com/channel/[\w-]+",
-        r"(?:https?://)?(?:www\.)?youtube\.com/@[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?youtube\.com/channel/[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?youtube\.com/@[\w.-]+",
     ],
     "soundcloud": [
-        r"(?:https?://)?(?:www\.)?soundcloud\.com/[\w-]+/[\w-]+",
-        r"(?:https?://)?(?:www\.)?soundcloud\.com/[\w-]+/sets/[\w-]+",
-        r"(?:https?://)?(?:www\.)?soundcloud\.com/[\w-]+",
+        r"(?:https?://)?on\.soundcloud\.com/[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?soundcloud\.com/[\w-]+/[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?soundcloud\.com/[\w-]+/sets/[\w-]+",
+        r"(?:https?://)?(?:www\.|m\.)?soundcloud\.com/[\w-]+",
     ],
     "bandcamp": [
         r"(?:https?://)?[\w-]+\.bandcamp\.com/track/[\w-]+",
@@ -61,12 +67,13 @@ def detect_platform(url: str) -> Optional[str]:
 
 def is_playlist_url(url: str) -> bool:
     playlist_patterns = [
-        r"youtube\.com/playlist\?list=",
+        r"youtube\.com/playlist\?(?:[^#]*&)?list=",
+        r"music\.youtube\.com/browse/",
         r"soundcloud\.com/[\w-]+/sets/",
         r"bandcamp\.com/album/",
         r"youtube\.com/@[\w-]+",
         r"youtube\.com/channel/",
-        r"soundcloud\.com/[\w-]+$",
+        r"(?<!on\.)soundcloud\.com/[\w-]+$",
         r"spotify\.com(?:/intl-[a-z]{2,3})?/(?:album|playlist|artist)/",
         r"^spotify:(?:album|playlist|artist):",
         r"musicbrainz\.org/release-group/",

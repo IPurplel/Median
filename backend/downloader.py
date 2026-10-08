@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 import uuid
 import shutil
 from pathlib import Path
@@ -8,7 +9,7 @@ from backend.config import settings
 from backend.utils.validators import detect_platform, is_playlist_url
 from backend.utils.file_organizer import (
     get_single_track_filename, get_album_filename,
-    get_playlist_folder,
+    reserve_playlist_folder,
     ensure_unique_path, find_downloaded_file, find_any_media_file
 )
 from backend.utils.validators import ORIGINAL_BITRATE, sanitize_filename
@@ -47,6 +48,65 @@ def _album_meta(metadata: dict, title: str, artist: str, album: str = '') -> dic
 
 
 CUSTOM_COVER_DIR = settings.custom_cover_path
+
+# Cooperative cancel flags for executor-bound yt-dlp work, keyed by download id.
+# asyncio.Task.cancel() cannot stop a thread blocked inside yt-dlp, so each
+# progress hook checks its flag and raises DownloadCancelled to abort the
+# transfer. Flags are plain thread-safe Event objects; the queue sets them on
+# cancel and the downloader pops them when the job settles.
+
+_cancel_flags: Dict[str, threading.Event] = {}
+
+
+def request_cancel(download_id: Optional[str]) -> None:
+    """Mark a download as cancelled so in-flight yt-dlp hooks abort."""
+    if download_id:
+        _cancel_flags.setdefault(download_id, threading.Event()).set()
+
+
+def _cancel_event(download_id: Optional[str]) -> Optional[threading.Event]:
+    if not download_id:
+        return None
+    return _cancel_flags.setdefault(download_id, threading.Event())
+
+
+def _check_cancelled(download_id: Optional[str]) -> None:
+    flag = _cancel_flags.get(download_id) if download_id else None
+    _raise_if_set(flag)
+
+
+def _raise_if_set(flag: Optional[threading.Event]) -> None:
+    if flag is not None and flag.is_set():
+        from yt_dlp.utils import DownloadCancelled
+        raise DownloadCancelled("Download cancelled by user")
+
+
+def _clear_cancel(download_id: Optional[str]) -> None:
+    if download_id:
+        _cancel_flags.pop(download_id, None)
+
+
+def make_cancel_hook(
+    download_id: Optional[str],
+    inner: Optional[Callable] = None,
+) -> Callable:
+    """Wrap a yt-dlp progress hook with a cooperative-cancel check.
+
+    Runs in yt-dlp's worker thread, so the check must stay synchronous —
+    the wrapped progress callback keeps its own thread hop.
+
+    The Event is captured now rather than looked up per call: on cancel the
+    queue's `finally` clears the registry entry immediately, while this thread
+    is still running — a by-id lookup would then find nothing and carry on.
+    """
+    flag = _cancel_event(download_id)
+
+    def _hook(d) -> None:
+        _raise_if_set(flag)
+        if inner is not None:
+            inner(d)
+    return _hook
+
 
 # Temp paths each in-flight download writes to, keyed by download id, so the
 # queue can delete leftovers when a download errors or is cancelled.
@@ -227,13 +287,14 @@ async def download_single(
                     main_loop
                 )
 
-    ydl_opts = get_ydl_opts(download_type, fmt, bitrate, temp_template + '.%(ext)s', hook)
+    ydl_opts = get_ydl_opts(download_type, fmt, bitrate, temp_template + '.%(ext)s', make_cancel_hook(download_id, hook))
 
     # Matched sources (a Spotify track found on YouTube) carry ranked
     # runner-ups; everything else is just the one URL, and behaves as before.
     await _fetch_with_fallback(
         [url] + list(metadata.get('url_alternatives') or []),
         ydl_opts, f"{artist} - {title}",
+        download_id=download_id,
     )
 
     audio_ext = 'mp3' if download_type == 'cover_audio' else ext
@@ -323,8 +384,12 @@ async def download_single(
 
         # Don't delete an uploaded cover — it may be re-used; only delete yt-dlp
         # temp files and URL-fetched fallback covers (which have the temp_template stem).
+        # The thumbnail yt-dlp fetched is a temp file too, and goes unused
+        # when an uploaded cover wins — it used to be left behind as an orphan.
         cover_is_uploaded = cover_id and cover_file and str(CUSTOM_COVER_DIR) in cover_file
-        for tmp_f in [downloaded_file] + ([] if cover_is_uploaded else [cover_file]):
+        temp_files = [downloaded_file] + ([] if cover_is_uploaded else [cover_file])
+        temp_files += [c for c in local_candidates if c and Path(c).name.startswith(stem)]
+        for tmp_f in dict.fromkeys(temp_files):
             if tmp_f and os.path.exists(tmp_f):
                 try:
                     os.remove(tmp_f)
@@ -391,7 +456,43 @@ async def download_single(
     }
 
 
-async def _fetch_with_fallback(sources: list, ydl_opts: dict, label: str) -> bool:
+def _clear_source_partials(outtmpl) -> int:
+    """Delete everything the previous source left under this stem (BE-004).
+
+    Called only when switching to a *different* source URL. The previous
+    source failed, so every file sharing the stem is its leftover: `.part`
+    and `.ytdl` partials, which yt-dlp would resume, and finished per-format
+    streams (`stem.f137.mp4`), which it would treat as "already downloaded"
+    and merge with the new source's other stream. Either way the bytes belong
+    to different media even when the names line up.
+    """
+    if not isinstance(outtmpl, str):
+        return 0
+    base = Path(outtmpl.replace('.%(ext)s', '').replace('%(ext)s', ''))
+    parent = base.parent
+    if not parent.is_dir():
+        return 0
+    # The trailing dot keeps "001 - Song" from matching "001 - Song Two".
+    prefix = base.name + '.'
+    removed = 0
+    for f in parent.iterdir():
+        if f.is_file() and f.name.startswith(prefix):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        app_logger.info(
+            f"Cleared {removed} leftover file(s) from the previous source"
+        )
+    return removed
+
+
+async def _fetch_with_fallback(
+    sources: list, ydl_opts: dict, label: str,
+    download_id: Optional[str] = None,
+) -> bool:
     """Fetch the first of `sources` that works, else re-raise the last error.
 
     The error is re-raised rather than swallowed because callers upstream read
@@ -409,16 +510,32 @@ async def _fetch_with_fallback(sources: list, ydl_opts: dict, label: str) -> boo
     If a source stays broken, the ranked runner-up matches are tried instead,
     so a stubborn video costs the album one track's quality rather than the
     track itself.
+
+    Cancellation is cooperative: the asyncio task wrapper cannot stop the
+    executor thread, so a cancel-only progress hook is appended — yt-dlp calls
+    every hook each poll, which raises DownloadCancelled promptly even when
+    the progress hook itself returns early. Cancel is never retried.
     """
     import yt_dlp
+    from yt_dlp.utils import DownloadCancelled
 
     loop = asyncio.get_running_loop()
     attempts = max(1, settings.TRACK_DOWNLOAD_ATTEMPTS)
     last_error = None
 
+    opts = dict(ydl_opts)
+    opts['progress_hooks'] = list(ydl_opts.get('progress_hooks') or []) + [
+        make_cancel_hook(download_id)
+    ]
+
     for source_index, url in enumerate(sources):
+        if source_index > 0:
+            # Different source, different media: a leftover partial from the
+            # previous candidate must not be resumed (BE-004).
+            _clear_source_partials(opts.get('outtmpl'))
         for attempt in range(1, attempts + 1):
-            def _dl(u=url, o=ydl_opts):
+            _check_cancelled(download_id)
+            def _dl(u=url, o=opts):
                 with yt_dlp.YoutubeDL(o) as ydl:
                     ydl.download([u])
             try:
@@ -429,6 +546,8 @@ async def _fetch_with_fallback(sources: list, ydl_opts: dict, label: str) -> boo
                         f"{'fallback source ' + str(source_index + 1) if source_index else f'attempt {attempt}'}"
                     )
                 return True
+            except DownloadCancelled:
+                raise
             except Exception as e:
                 last_error = e
                 app_logger.warning(
@@ -471,6 +590,7 @@ async def _download_each_track(
     fmt: str,
     bitrate: str,
     progress_callback: Optional[Callable],
+    download_id: Optional[str] = None,
 ) -> list:
     """Download an album whose tracks each come from a different source URL.
 
@@ -545,8 +665,14 @@ async def _download_each_track(
 
         sources = [track_url] + list(track.get('url_alternatives') or [])
         try:
-            await _fetch_with_fallback(sources, ydl_opts, f"Track {number} ({title})")
-        except Exception:
+            await _fetch_with_fallback(
+                sources, ydl_opts, f"Track {number} ({title})",
+                download_id=download_id,
+            )
+        except Exception as e:
+            from yt_dlp.utils import DownloadCancelled as _DC
+            if isinstance(e, _DC):
+                raise
             # Already logged per attempt. One unobtainable track is reported
             # below as a skip — it must not abandon the rest of the album.
             pass
@@ -655,21 +781,27 @@ async def download_playlist(
                 if download_type == 'cover_audio':
                     ydl_opts = get_ydl_opts(
                         'cover_audio', 'mp3', bitrate,
-                        temp_template + '.%(ext)s', merge_hook
+                        temp_template + '.%(ext)s', make_cancel_hook(download_id, merge_hook)
                     )
                 else:
                     ydl_opts = get_ydl_opts(
                         download_type, fmt, bitrate,
-                        temp_template + '.%(ext)s', merge_hook
+                        temp_template + '.%(ext)s', make_cancel_hook(download_id, merge_hook)
                     )
 
-                def _dl(u=track_url, o=ydl_opts):
-                    with yt_dlp.YoutubeDL(o) as ydl:
-                        ydl.download([u])
-
+                # Same fallback ladder as separate-track downloads: the
+                # matched runner-ups ride along, so one dead primary costs the
+                # merge one track at most (BE-002).
                 try:
-                    await loop.run_in_executor(None, _dl)
+                    await _fetch_with_fallback(
+                        [track_url] + list(track.get('url_alternatives') or []),
+                        ydl_opts, f"Track {i+1} ({track.get('title', '?')})",
+                        download_id=download_id,
+                    )
                 except Exception as e:
+                    from yt_dlp.utils import DownloadCancelled as _DC2
+                    if isinstance(e, _DC2):
+                        raise
                     app_logger.warning(f"Track {i+1} download raised: {e}")
 
                 dl_ext = 'mp3' if download_type == 'cover_audio' else ext
@@ -734,6 +866,7 @@ async def download_playlist(
                     downloaded_files, str(output_path), fmt,
                     progress_callback=progress_callback,
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
+                    tracks_meta=downloaded_tracks,
                 )
             elif download_type == 'cover_audio':
                 cover_file = await _resolve_cover_file(
@@ -808,8 +941,9 @@ async def download_playlist(
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
     else:
-        album_folder = download_dir / get_playlist_folder(artist, album)
-        album_folder.mkdir(parents=True, exist_ok=True)
+        # Reserve atomically: two downloads of the same album must never share
+        # a directory (BE-003), and mkdir is the only portable atomic create.
+        album_folder = reserve_playlist_folder(download_dir, artist, album)
         _register_temp(download_id, 'partials', album_folder)
 
         # Tracks matched one-by-one to unrelated sources (a Spotify album, whose
@@ -820,6 +954,7 @@ async def download_playlist(
             per_track = await _download_each_track(
                 tracks, album_folder, download_type, fmt, bitrate,
                 progress_callback,
+                download_id=download_id,
             )
         else:
             # With a partial selection, keep each track's original album position in
@@ -839,6 +974,8 @@ async def download_playlist(
             completed = [0]
             job_eta = JobEta()
             weights = TrackWeights(tracks)
+
+            finished_ids = set()
 
             def hook(d):
                 if not progress_callback or not loop.is_running():
@@ -861,6 +998,14 @@ async def download_playlist(
                         loop
                     )
                 elif d['status'] == 'finished':
+                    # yt-dlp reports 'finished' once per downloaded format, and
+                    # a video track is two (video + audio) — counting events
+                    # showed "Downloaded 4/2 tracks" and overran the bar.
+                    info = d.get('info_dict') or {}
+                    key = info.get('id') or info.get('webpage_url') or d.get('filename')
+                    if key in finished_ids:
+                        return
+                    finished_ids.add(key)
                     completed[0] += 1
                     done = weights.fraction(completed[0])
                     asyncio.run_coroutine_threadsafe(
@@ -872,12 +1017,13 @@ async def download_playlist(
                         loop
                     )
 
-            ydl_opts['progress_hooks'] = [hook]
+            ydl_opts['progress_hooks'] = [hook, make_cancel_hook(download_id)]
 
             def _download():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
 
+            _check_cancelled(download_id)
             await loop.run_in_executor(None, _download)
 
         IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}

@@ -13,6 +13,47 @@ def _escape_meta_value(s: str) -> str:
              .replace('=', '\\='))
 
 
+def _chapter_starts(tracks: List[Dict], overlap_seconds: float = 0.0):
+    """(start of each track in ms, total length in ms) on the merged timeline."""
+    overlap_ms = max(0, int(overlap_seconds * 1000))
+    starts: List[int] = []
+    cursor = 0
+    for i, track in enumerate(tracks):
+        duration_ms = int((track.get('duration') or 0) * 1000)
+        start_ms = 0 if i == 0 else max(0, cursor - overlap_ms)
+        starts.append(start_ms)
+        cursor = start_ms + duration_ms
+    return starts, cursor
+
+
+def _fmt_vorbis_time(ms: int) -> str:
+    h, rem = divmod(ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _add_flac_chapters(file_path: str, tracks: List[Dict], overlap_seconds: float) -> bool:
+    """FLAC chapters as CHAPTERxxx / CHAPTERxxxNAME Vorbis comments.
+
+    ffmpeg's FLAC muxer silently drops chapters, so the ffmpeg pass reported
+    success on a file with none. This is the de-facto Vorbis chapter format
+    that ffmpeg, mpv and foobar2000 read back.
+    """
+    from mutagen.flac import FLAC
+
+    starts, _ = _chapter_starts(tracks, overlap_seconds)
+    audio = FLAC(file_path)
+    for key in [k for k in (audio.tags or {}).keys() if k.upper().startswith('CHAPTER')]:
+        del audio[key]
+    for i, (track, start_ms) in enumerate(zip(tracks, starts), start=1):
+        audio[f'CHAPTER{i:03d}'] = _fmt_vorbis_time(start_ms)
+        audio[f'CHAPTER{i:03d}NAME'] = track.get('title') or f'Track {i}'
+    audio.save()
+    app_logger.info(f"Chapters added to: {file_path}")
+    return True
+
+
 def generate_ffmpeg_metadata(
     tracks: List[Dict],
     output_path: str,
@@ -25,17 +66,7 @@ def generate_ffmpeg_metadata(
     a naive cumulative sum. Chapter i spans [start_i, start_{i+1}); the final
     chapter runs to the true end of the (shortened) timeline.
     """
-    overlap_ms = max(0, int(overlap_seconds * 1000))
-
-    # Compute each track's start position on the (possibly crossfaded) timeline.
-    starts: List[int] = []
-    cursor = 0
-    for i, track in enumerate(tracks):
-        duration_ms = int((track.get('duration') or 0) * 1000)
-        start_ms = 0 if i == 0 else max(0, cursor - overlap_ms)
-        starts.append(start_ms)
-        cursor = start_ms + duration_ms
-    total_ms = cursor
+    starts, total_ms = _chapter_starts(tracks, overlap_seconds)
 
     lines = [";FFMETADATA1\n"]
     for i, track in enumerate(tracks):
@@ -101,6 +132,13 @@ def add_chapters_to_file(
             dur = get_media_duration(track['file_path'])
             track = {**track, 'duration': dur or 0}
         verified_tracks.append(track)
+
+    if Path(file_path).suffix.lower() == '.flac':
+        try:
+            return _add_flac_chapters(file_path, verified_tracks, overlap_seconds)
+        except Exception as e:
+            app_logger.error(f"Chapter addition error: {e}")
+            return False
 
     meta_file = None
     temp_output = None

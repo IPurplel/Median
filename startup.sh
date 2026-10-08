@@ -15,6 +15,23 @@ warn() { echo -e "${YELLOW}  !${RESET} $1"; }
 fail() { echo -e "${RED}  x${RESET} $1"; }
 info() { echo -e "${DIM}    $1${RESET}"; }
 
+# Value of KEY as Docker Compose resolves it: an exported shell variable wins,
+# otherwise the last KEY= line in .env, with an inline " # comment" and
+# surrounding quotes stripped (CORE-004, CORE-005). Prints nothing if unset.
+env_value() {
+  local key="$1" val
+  if [ -n "${!key:-}" ]; then
+    printf '%s' "${!key}"
+    return
+  fi
+  [ -f .env ] || return 0
+  val=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2-) || true
+  val=$(printf '%s' "$val" | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//')
+  val="${val#\"}"; val="${val%\"}"
+  val="${val#\'}"; val="${val%\'}"
+  printf '%s' "$val"
+}
+
 echo ""
 echo -e "${BOLD}┌─────────────────────────────────────────┐${RESET}"
 echo -e "${BOLD}│        MEDIAN v2  — Audio Downloader   │${RESET}"
@@ -64,10 +81,14 @@ else
   exit 1
 fi
 
+# Same port Compose publishes (${PORT:-8080}:80), read the same way it does.
+PORT_NUM=$(env_value PORT)
+PORT_NUM=${PORT_NUM:-8080}
+
 step "Waiting for Median to be ready..."
 TIMEOUT=60
 ELAPSED=0
-until curl -sf http://localhost:${PORT:-8080}/api/health >/dev/null 2>&1; do
+until curl -sf "http://localhost:${PORT_NUM}/api/health" >/dev/null 2>&1; do
   if [ $ELAPSED -ge $TIMEOUT ]; then
     fail "Timed out waiting for Median to start."
     info "Check logs: docker compose logs median"
@@ -81,7 +102,6 @@ echo ""
 ok "Median is healthy"
 
 LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
-PORT_NUM=${PORT:-8080}
 
 echo ""
 echo -e "${BOLD}${GREEN}  Median v2 is running!${RESET}"
@@ -92,6 +112,6 @@ echo ""
 echo -e "  ${DIM}Logs:           docker compose logs -f median${RESET}"
 echo -e "  ${DIM}Stop:           docker compose down${RESET}"
 echo ""
-CLEANUP_MINS=$(grep -E '^CLEANUP_INTERVAL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 15)
-echo -e "${DIM}  Files are auto-cleaned after ${CLEANUP_MINS:-15} minutes. Use 'Keep' to preserve them.${RESET}"
+CLEANUP_MINS=$(env_value CLEANUP_INTERVAL)
+echo -e "${DIM}  Files are auto-cleaned after ${CLEANUP_MINS:-90} minutes. Use 'Keep' to preserve them.${RESET}"
 echo ""

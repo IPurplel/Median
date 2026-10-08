@@ -1,5 +1,4 @@
 import asyncio
-import subprocess
 import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -272,33 +271,35 @@ async def cleanup_stale_partials():
         app_logger.info(f"Stale-partial sweep: removed {removed} leftover(s)")
 
 
+def _sweep_custom_covers() -> int:
+    """Delete uploaded covers older than COVER_UPLOAD_TTL_HOURS (BE-011)."""
+    cover_dir = settings.custom_cover_path
+    if not cover_dir.is_dir():
+        return 0
+    cutoff = datetime.now().timestamp() - settings.COVER_UPLOAD_TTL_HOURS * 3600
+    removed = 0
+    for f in cover_dir.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+async def cleanup_custom_covers():
+    loop = asyncio.get_running_loop()
+    removed = await loop.run_in_executor(None, _sweep_custom_covers)
+    if removed:
+        app_logger.info(f"Custom-cover sweep: removed {removed} expired upload(s)")
+
+
 async def cleanup_cache():
     try:
         metadata_cache.cleanup_expired()
     except Exception as e:
         app_logger.error(f"Cache cleanup error: {e}")
-
-
-async def update_yt_dlp():
-    loop = asyncio.get_running_loop()
-    try:
-        result = await loop.run_in_executor(None, lambda: subprocess.run(
-            ['pip', 'install', '--upgrade', 'yt-dlp', '--quiet', '--break-system-packages'],
-            capture_output=True, text=True, timeout=120
-        ))
-        if result.returncode == 0:
-            app_logger.info("yt-dlp updated successfully")
-        else:
-            result2 = await loop.run_in_executor(None, lambda: subprocess.run(
-                ['pip', 'install', '--upgrade', 'yt-dlp', '--quiet'],
-                capture_output=True, text=True, timeout=120
-            ))
-            if result2.returncode == 0:
-                app_logger.info("yt-dlp updated successfully")
-            else:
-                app_logger.warning(f"yt-dlp update failed: {result2.stderr}")
-    except Exception as e:
-        app_logger.error(f"yt-dlp update error: {e}")
 
 
 async def vacuum_database():
@@ -379,16 +380,17 @@ def start_scheduler():
     )
 
     scheduler.add_job(
-        cleanup_cache,
+        cleanup_custom_covers,
         IntervalTrigger(hours=1),
-        id='cleanup_cache',
-        replace_existing=True
+        id='cleanup_custom_covers',
+        replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),
     )
 
     scheduler.add_job(
-        update_yt_dlp,
-        IntervalTrigger(hours=settings.AUTO_UPDATE_INTERVAL),
-        id='update_yt_dlp',
+        cleanup_cache,
+        IntervalTrigger(hours=1),
+        id='cleanup_cache',
         replace_existing=True
     )
 

@@ -7,6 +7,7 @@ from backend.db_models import get_db, row_to_dict
 from backend.downloader import (
     download_single, download_playlist,
     cleanup_partials, discard_temp_entries,
+    request_cancel, _clear_cancel,
 )
 from backend.metadata_handler import extract_metadata
 from backend.logger import app_logger
@@ -178,6 +179,12 @@ def update_download_status(
             'progress': progress if progress is not None else state.get('progress', 0),
             'speed': updates.get('speed', speed or state.get('speed', '')),
             'eta': updates.get('eta', eta or state.get('eta', '')),
+            # One schema everywhere: the frontend and the DB-backed fallback
+            # both read `error_message` (FE-002).
+            'error_message': (
+                error_message if error_message is not None
+                else state.get('error_message')
+            ),
         })
 
 
@@ -254,7 +261,7 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
     Returns (metadata, download_url). Tracks that can't be found anywhere are
     dropped with a visible note rather than failing the whole album.
     """
-    from backend.utils.yt_match import match_all, match_track
+    from backend.utils.yt_match import match_all, match_track, CandidateProbeError
 
     async def warn(message: str):
         if progress_callback:
@@ -262,9 +269,19 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
 
     if not metadata.get('is_playlist'):
         title = metadata.get('title', '')
-        match = await match_track(
-            title, metadata.get('artist', ''), int(metadata.get('duration') or 0)
-        )
+        try:
+            match = await match_track(
+                title, metadata.get('artist', ''), int(metadata.get('duration') or 0)
+            )
+        except CandidateProbeError as e:
+            # The probe failed for an infrastructure reason — the song may
+            # well exist. Reporting it as "not found" would send the user
+            # hunting for a copy problem that isn't there (BE-001).
+            raise RuntimeError(
+                f'YouTube extraction failed for "{title}" '
+                f'({e.verdict.value}): {e.cause}. This is a network or '
+                f'extractor problem, not a missing song.'
+            ) from e
         if not match:
             raise RuntimeError(
                 f'Couldn\'t find "{title}" on YouTube. Spotify\'s own audio is '
@@ -293,13 +310,18 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
                 f"Finding tracks on YouTube... {done}/{total}",
             )
 
-    matches = await match_all(tracks, on_progress=on_progress)
+    probe_failures = []
+    matches = await match_all(tracks, on_progress=on_progress, failures=probe_failures)
+    probe_failed = {id(t) for t, _ in probe_failures}
 
     resolved, missing, shaky = [], [], []
     for track, match in zip(tracks, matches):
         title = track.get('title', '')
         if not match:
-            missing.append(title)
+            # A track whose verification blew up is not a track that doesn't
+            # exist — keep it out of the "couldn't be found" list (BE-001).
+            if id(track) not in probe_failed:
+                missing.append(title)
             continue
         found = dict(track)
         found['url'] = match.url
@@ -310,12 +332,27 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
             shaky.append(f'"{title}" (matched "{match.title}")')
 
     if not resolved:
+        if missing == [] and probe_failures:
+            # Every track failed verification — nothing was proven missing.
+            _t0, err0 = probe_failures[0]
+            raise RuntimeError(
+                f'YouTube extraction failed while verifying these tracks '
+                f'({err0.verdict.value}): {err0.cause}. This is a network or '
+                f'extractor problem, not missing songs.'
+            )
         raise RuntimeError(
             "None of these tracks could be found on YouTube. Spotify's own "
             "audio is copy-protected, so Median can only fetch songs that "
             "exist there too."
         )
 
+    if probe_failures:
+        titles = ', '.join((t.get('title') or '?') for t, _ in probe_failures[:3])
+        await warn(
+            f"{len(probe_failures)} track(s) could not be verified because "
+            f"the YouTube extractor/network failed (not missing): {titles}"
+            + ("..." if len(probe_failures) > 3 else "")
+        )
     if missing:
         await warn(
             f"{len(missing)} track(s) couldn't be found on YouTube and were "
@@ -543,10 +580,11 @@ async def process_download(download_id: str, download_params: dict):
             cleanup_partials(download_id)
             update_download_status(download_id, 'error', error_message=error_msg)
             download_states[download_id]['status'] = 'error'
-            download_states[download_id]['error'] = error_msg
+            download_states[download_id]['error_message'] = error_msg
             app_logger.error(f"Download error [{download_id[:8]}]: {error_msg}")
         finally:
             discard_temp_entries(download_id)
+            _clear_cancel(download_id)
             if download_id in active_downloads:
                 del active_downloads[download_id]
             t = asyncio.create_task(_deferred_state_cleanup(download_id))
@@ -618,6 +656,10 @@ def detect_platform_from_params(params: dict) -> str:
 
 def cancel_download(download_id: str) -> bool:
     if download_id in active_downloads:
+        # Flag first: the executor thread polls it from yt-dlp progress hooks
+        # and stops promptly — asyncio cancellation alone cannot reach a
+        # thread blocked inside yt-dlp (CORE-003).
+        request_cancel(download_id)
         active_downloads[download_id].cancel()
         return True
     return False
