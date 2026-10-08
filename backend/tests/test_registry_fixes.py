@@ -1039,3 +1039,62 @@ def test_soundcloud_share_link_uses_the_uploader_url():
                          {'artist_url': 'https://soundcloud.com/realartist'})
     assert pages[0] == 'https://soundcloud.com/realartist/albums'
     assert artist_pages('https://on.soundcloud.com/Xy7Kp2', {}) == []
+
+
+# ── Fourth round ─────────────────────────────────────────────────────────────
+
+def _make_audio(path):
+    import shutil, subprocess
+    if not shutil.which('ffmpeg'):
+        pytest.skip('ffmpeg not installed')
+    codec = {'.m4a': ['-c:a', 'aac'], '.flac': ['-c:a', 'flac'], '.mp3': []}[path.suffix]
+    subprocess.run(['ffmpeg', '-loglevel', 'error', '-y', '-f', 'lavfi',
+                    '-i', 'sine=d=1', *codec, str(path)], check=True)
+
+
+@pytest.mark.parametrize('ext', ['.mp3', '.m4a', '.flac'])
+@pytest.mark.parametrize('cover_fmt,cover_name,want', [
+    ('WEBP', '_album_cover.jpg', 'JPEG'),  # YouTube thumbnail saved as .jpg
+    ('GIF', 'upload.gif', 'JPEG'),
+    ('PNG', 'mislabelled.jpg', 'PNG'),
+])
+def test_be036_cover_embedded_in_its_real_format(tmp_path, ext, cover_fmt, cover_name, want):
+    import io
+    from PIL import Image
+    from backend.utils.tag_writer import write_tags
+    audio = tmp_path / f'a{ext}'
+    _make_audio(audio)
+    cover = tmp_path / cover_name
+    Image.new('RGB', (64, 64), 'red').save(cover, cover_fmt)
+
+    assert write_tags(str(audio), title='t', cover_path=str(cover))
+
+    if ext == '.mp3':
+        from mutagen.id3 import ID3
+        apic = ID3(str(audio)).getall('APIC')[0]
+        data, mime = apic.data, apic.mime
+    elif ext == '.m4a':
+        from mutagen.mp4 import MP4, MP4Cover
+        covr = MP4(str(audio))['covr'][0]
+        data = bytes(covr)
+        mime = 'image/png' if covr.imageformat == MP4Cover.FORMAT_PNG else 'image/jpeg'
+    else:
+        from mutagen.flac import FLAC
+        pic = FLAC(str(audio)).pictures[0]
+        data, mime = pic.data, pic.mime
+    assert Image.open(io.BytesIO(data)).format == want
+    assert mime == f'image/{want.lower()}'
+
+
+def test_be036_sidecar_and_download_are_converted(tmp_path):
+    from PIL import Image
+    from backend.image_processor import save_cover_as
+    src = tmp_path / 'up.webp'
+    Image.new('RGB', (32, 32), 'blue').save(src, 'WEBP')
+    save_cover_as(str(src), str(tmp_path / 'cover.jpg'))
+    assert Image.open(tmp_path / 'cover.jpg').format == 'JPEG'
+    # In place, as download_cover_image does with a WebP saved under .jpg
+    inplace = tmp_path / '_cover.jpg'
+    inplace.write_bytes(src.read_bytes())
+    save_cover_as(str(inplace), str(inplace))
+    assert Image.open(inplace).format == 'JPEG'

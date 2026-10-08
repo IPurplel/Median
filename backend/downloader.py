@@ -17,7 +17,7 @@ from backend.concatenation_engine import (
     concatenate_audio, concatenate_video, create_cover_audio_video,
     attach_cover_to_mkv,
 )
-from backend.image_processor import download_cover_image
+from backend.image_processor import download_cover_image, save_cover_as
 from backend.logger import app_logger
 from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP
 from backend.utils.tag_writer import write_tags
@@ -1224,8 +1224,9 @@ async def download_playlist(
                 target = album_folder / f'cover{ext}'
                 try:
                     if src.resolve() != target.resolve():
-                        import shutil as _sh
-                        _sh.copyfile(src, target)
+                        # Converted, not copied: a .webp/.gif upload copied
+                        # byte-for-byte left WebP data in cover.jpg (BE-036).
+                        save_cover_as(str(src), str(target))
                     sidecar_kept = target
                 except Exception as e:
                     app_logger.warning(f"sidecar cover.jpg copy failed: {e}")

@@ -55,3 +55,4 @@ FE-004,Medium,P2,Frontend,Running downloads invisible after a page refresh,Verif
 FE-005,Low,P3,Frontend,Validation errors show [object Object],Verified
 FE-006,Medium,P2,Frontend,Original bitrate plus FLAC saves a non-FLAC file,Verified
 FE-007,Low,P3,Frontend,Blocked site storage stops the page script,Verified
+BE-036,Medium,P2,Cover art / tags,Covers embedded with the wrong image format,Verified

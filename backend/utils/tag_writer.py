@@ -159,8 +159,11 @@ def embed_lyrics_into_download(path: str, entries: list, merged: bool) -> int:
     return tagged
 
 
-def _cover_mime(cover_path: str) -> str:
-    return 'image/png' if cover_path.lower().endswith('.png') else 'image/jpeg'
+def _cover(cover_path: str) -> tuple:
+    """(bytes, mime) for a cover file, by its real format, not its name (BE-036)."""
+    from backend.image_processor import cover_bytes_for_tags
+    data, fmt = cover_bytes_for_tags(cover_path)
+    return data, f'image/{fmt}'
 
 
 def _write_mp3(file_path: str, f: dict, cover_path: Optional[str]):
@@ -194,11 +197,9 @@ def _write_mp3(file_path: str, f: dict, cover_path: Optional[str]):
 
     if cover_path and Path(cover_path).is_file():
         # Strip any existing covers and write a fresh one
+        data, mime = _cover(cover_path)
         tags.delall('APIC')
-        tags.add(APIC(
-            encoding=0, mime=_cover_mime(cover_path),
-            type=3, desc='', data=Path(cover_path).read_bytes(),
-        ))
+        tags.add(APIC(encoding=0, mime=mime, type=3, desc='', data=data))
     else:
         # No new cover supplied, but yt-dlp's EmbedThumbnail wrote one with
         # desc='Album cover'. AIMP (and some other strict players) treat any
@@ -239,9 +240,8 @@ def _write_flac(file_path: str, f: dict, cover_path: Optional[str]):
         audio.clear_pictures()
         pic = Picture()
         pic.type = PictureType.COVER_FRONT
-        pic.mime = _cover_mime(cover_path)
+        pic.data, pic.mime = _cover(cover_path)
         pic.desc = 'Cover'
-        pic.data = Path(cover_path).read_bytes()
         audio.add_picture(pic)
 
     audio.save()
@@ -261,8 +261,8 @@ def _write_mp4(file_path: str, f: dict, cover_path: Optional[str]):
     if f['track']:  audio['trkn'] = [(f['track'], f['track_total'])]
 
     if cover_path and Path(cover_path).is_file():
-        data = Path(cover_path).read_bytes()
-        fmt = MP4Cover.FORMAT_PNG if cover_path.lower().endswith('.png') else MP4Cover.FORMAT_JPEG
+        data, mime = _cover(cover_path)
+        fmt = MP4Cover.FORMAT_PNG if mime == 'image/png' else MP4Cover.FORMAT_JPEG
         audio['covr'] = [MP4Cover(data, imageformat=fmt)]
 
     audio.save()
@@ -291,9 +291,8 @@ def _write_ogg(file_path: str, f: dict, cover_path: Optional[str], opus: bool):
     if cover_path and Path(cover_path).is_file():
         pic = Picture()
         pic.type = PictureType.COVER_FRONT
-        pic.mime = _cover_mime(cover_path)
+        pic.data, pic.mime = _cover(cover_path)
         pic.desc = 'Cover'
-        pic.data = Path(cover_path).read_bytes()
         audio['metadata_block_picture'] = [base64.b64encode(pic.write()).decode('ascii')]
 
     audio.save()

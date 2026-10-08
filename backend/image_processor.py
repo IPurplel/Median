@@ -312,6 +312,38 @@ def _center_crop(img, target_w: int, target_h: int):
     return cropped.resize((target_w, target_h), Image.LANCZOS)
 
 
+def cover_bytes_for_tags(image_path: str) -> Tuple[bytes, str]:
+    """The cover as (bytes, 'jpeg' | 'png'), ready to embed in tags.
+
+    Tags only reliably carry JPEG and PNG, and the format used to be guessed
+    from the extension: YouTube's WebP thumbnails, saved under a .jpg name,
+    and uploaded .webp/.gif covers went in labelled as JPEG and no player
+    could decode them (BE-036). JPEG and PNG pass through untouched; anything
+    else is re-encoded as JPEG.
+    """
+    data = Path(image_path).read_bytes()
+    with Image.open(image_path) as img:
+        fmt = (img.format or '').upper()
+        if fmt in ('JPEG', 'PNG'):
+            return data, fmt.lower()
+        import io
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, 'JPEG', quality=92)
+        return buf.getvalue(), 'jpeg'
+
+
+def save_cover_as(src: str, dest: str):
+    """Write `src` to `dest` in the format dest's extension names (.jpg/.png)."""
+    data, fmt = cover_bytes_for_tags(src)
+    want = 'png' if dest.lower().endswith('.png') else 'jpeg'
+    if fmt != want:
+        with Image.open(src) as img:
+            out = img if want == 'png' else img.convert('RGB')
+            out.save(dest, 'PNG' if want == 'png' else 'JPEG', quality=92)
+        return
+    Path(dest).write_bytes(data)
+
+
 async def download_cover_image(url: str, dest_path: str) -> Optional[str]:
     import aiohttp
 
@@ -331,6 +363,15 @@ async def download_cover_image(url: str, dest_path: str) -> Optional[str]:
                     with open(dest_path, 'wb') as f:
                         async for chunk in resp.content.iter_chunked(8192):
                             f.write(chunk)
+                    # Callers name the file .jpg, but YouTube serves WebP
+                    # thumbnails — make the content match the name (BE-036).
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, save_cover_as, dest_path, dest_path)
+                    except Exception as e:
+                        app_logger.warning(f"Downloaded cover is not a readable image: {e}")
+                        os.remove(dest_path)
+                        return None
                     return dest_path
     except Exception as e:
         app_logger.error(f"Cover download error: {e}")
