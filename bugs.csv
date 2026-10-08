@@ -30,3 +30,18 @@ BE-017,Low,P3,Progress,Video playlists count each track twice,Fixed
 BE-018,Medium,P2,Video format,MP4 downloads use AV1 video,Verified
 CORE-006,High,P1,Docker,deno install fails the image build on 32-bit ARM,Fixed
 API-002,High,P1,URL validation,YouTube Music / mobile / Shorts / SoundCloud short links rejected,Verified
+BE-019,High,P1,Queue / Cancel,Cancelling a queued download leaves it queued forever,Verified
+BE-020,High,P1,Playlist download,One private or deleted video fails a whole separate-track playlist,Fixed
+BE-021,High,P1,Storage,Failed or retried album folders are left on disk forever,Fixed
+BE-022,High,P1,Video merge,Merged WebM playlists over ~3 minutes time out,Verified
+BE-023,Medium,P2,Progress,Merge progress jumps backwards and says Complete early,Verified
+BE-024,Medium,P2,Cancel / ffmpeg,Cancelling a merge leaves ffmpeg running and an orphan file,Verified
+BE-025,Medium,P2,Playlist download,MAX_PLAYLIST_TRACKS not applied to separate-track downloads,Fixed
+FE-003,Medium,P2,Frontend,Page freezes after about 6 downloads (one EventSource each),Verified
+SEC-004,Medium,P2,API validation,/api/download skips URL validation,Verified
+BE-026,Low,P3,Chapters / Tags,Chapter pass wipes container tags on merged cover+audio MKV/WebM,Verified
+BE-027,Low,P3,Backups,Full backups include the cover cache and temp folders,Fixed
+BE-028,Low,P3,Storage,Same artist/title downloads can overwrite each other,Fixed
+BE-029,Low,P3,Statistics,Activity chart labels use local time against UTC rows,Fixed
+BE-030,Low,P3,Chapters / Covers,Chapter pass drops the cover attachment from merged cover+audio MKV,Verified
+BE-031,Low,P3,Cancel / Storage,Late yt-dlp writes after a cancel leave temp files until the stale sweep,Confirmed
