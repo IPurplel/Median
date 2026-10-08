@@ -67,6 +67,14 @@ def artist_pages(url: str, metadata: Optional[dict] = None) -> list:
         return []
 
     if platform == 'soundcloud':
+        # A share link (on.soundcloud.com/Xy7Kp2) carries a code, not a user —
+        # reading its path gave soundcloud.com/Xy7Kp2. The uploader URL from
+        # the extracted metadata names the real account (BE-035).
+        uploader = (metadata.get('artist_url') or '').strip()
+        if uploader and urlparse(uploader).netloc.lower().endswith('soundcloud.com'):
+            parsed = urlparse(uploader)
+        elif parsed.netloc.lower().startswith('on.'):
+            return []
         m = _SOUNDCLOUD_USER_RE.match(parsed.path)
         if not m:
             return []

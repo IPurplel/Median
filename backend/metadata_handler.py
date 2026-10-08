@@ -163,6 +163,10 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 'extract_flat': False,
                 'skip_download': True,
                 'socket_timeout': 30,
+                # A watch link opened from a playlist or Mix carries &list=.
+                # Median treats it as one video, but yt-dlp would otherwise
+                # expand it to the whole playlist (BE-034).
+                'noplaylist': True,
             }
             def _single():
                 with yt_dlp.YoutubeDL(full_opts) as ydl:

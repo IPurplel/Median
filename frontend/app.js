@@ -61,6 +61,16 @@ function setApiToken(token) {
 
 let _sessionToken = '';
 
+// localStorage throws outright when the browser blocks site data. Unguarded
+// reads at load time stopped the whole script, leaving Download dead (FE-007).
+function storageGet(key, fallback = null) {
+  try { return localStorage.getItem(key) ?? fallback; } catch (_) { return fallback; }
+}
+
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) { /* not persisted */ }
+}
+
 function authHeaders() {
   const token = getApiToken() || _sessionToken;
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -91,8 +101,17 @@ async function api(method, path, body) {
   if (body) opts.body = JSON.stringify(body);
   const res = await authFetch(API + path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(errorText(data.detail) || `HTTP ${res.status}`);
   return data;
+}
+
+// FastAPI's validation errors put a list of {msg, ...} under `detail`; shown
+// as-is that read "[object Object]" (FE-005).
+function errorText(detail) {
+  if (Array.isArray(detail)) {
+    return detail.map((d) => (d && d.msg ? d.msg.replace(/^Value error, /, '') : String(d))).join('; ');
+  }
+  return detail ? String(detail) : '';
 }
 
 // ── Collapsible panels ────────────────────────────────────────────────────────
@@ -506,9 +525,9 @@ $('#discography-selectall')?.addEventListener('click', () => {
 // Applies to every download type; the last choice is remembered.
 const _descToggle = $('#description-toggle');
 if (_descToggle) {
-  _descToggle.checked = localStorage.getItem('median_include_description') === '1';
+  _descToggle.checked = storageGet('median_include_description') === '1';
   _descToggle.addEventListener('change', (e) => {
-    localStorage.setItem('median_include_description', e.target.checked ? '1' : '0');
+    storageSet('median_include_description', e.target.checked ? '1' : '0');
   });
 }
 
@@ -586,6 +605,13 @@ $$('#download-options .fmt-pill').forEach(pill => {
       bitrateGrp.classList.remove('hidden');
     } else if (currentFormat === 'flac') {
       bitrateGrp.classList.add('hidden');
+      // "Original" skips conversion entirely, so with the box hidden it would
+      // silently turn a FLAC request into the source's own .opus (FE-006).
+      if (currentBitrate === 'original') {
+        currentBitrate = '320';
+        $('#bitrate-select').value = '320';
+        syncBitrateHint();
+      }
     }
   });
 });
@@ -678,7 +704,7 @@ $('#cover-file-input').addEventListener('change', async (e) => {
   try {
     const res = await authFetch('/api/cover/upload', { method: 'POST', body: form });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+    if (!res.ok) throw new Error(errorText(data.detail) || 'Upload failed');
 
     customCoverId = data.cover_id;
     $('#custom-cover-name').textContent = data.filename;
@@ -876,6 +902,9 @@ async function pollTrackedDownloads() {
 }
 
 function pollDownload(id, title, artist) {
+  // Also reached when restoring after a refresh, where nothing else un-hides
+  // the section — the downloads were tracked but invisible (FE-004).
+  activeSection.classList.remove('hidden');
   const item = document.createElement('div');
   item.className = 'dl-item status-queued';
   item.id = `dl-${id}`;
@@ -1650,7 +1679,8 @@ function debounce(fn, ms) {
 
   // Bug #16 fix: Restore active downloads from localStorage but validate each ID
   // against the server first — skip IDs that no longer exist in the DB.
-  const saved = JSON.parse(localStorage.getItem('median_active') || '[]');
+  let saved = [];
+  try { saved = JSON.parse(storageGet('median_active', '[]')) || []; } catch (_) {}
   saved.forEach(async ({ id, title, artist }) => {
     try {
       const s = await api('GET', `/api/download/${id}/status`);
@@ -1685,6 +1715,6 @@ function debounce(fn, ms) {
         artist: el?.querySelector('.dl-artist')?.textContent || '',
       };
     });
-    localStorage.setItem('median_active', JSON.stringify(active));
+    storageSet('median_active', JSON.stringify(active));
   });
 })();

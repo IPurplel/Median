@@ -15,12 +15,16 @@
   function apply(theme) {
     if (!NAMES[theme]) theme = 'dark';
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('median_theme', theme);
+    // Blocked site data makes localStorage throw; the theme still applies,
+    // it just isn't remembered (FE-007).
+    try { localStorage.setItem('median_theme', theme); } catch (_) {}
     const cycleBtn = document.getElementById('theme-cycle');
     if (cycleBtn) cycleBtn.title = `Cycle theme (current: ${NAMES[theme]})`;
   }
 
-  apply(localStorage.getItem('median_theme') || 'dark');
+  let saved = null;
+  try { saved = localStorage.getItem('median_theme'); } catch (_) {}
+  apply(saved || 'dark');
 
   document.addEventListener('DOMContentLoaded', () => {
     apply(document.documentElement.getAttribute('data-theme'));

@@ -963,3 +963,79 @@ def test_v2_validators_behave_like_before():
                         cover_id='not-a-uuid')
     with pytest.raises(ValidationError):
         CoverPreviewRequest(thumbnail_url='https://evil.example/x.jpg')
+
+
+# ── Third bug hunt (2026-10-08) ──────────────────────────────────────────────
+
+# SEC-005: a supported-looking prefix can't smuggle in another host
+
+@pytest.mark.parametrize('url', [
+    'https://x.bandcamp.com@127.0.0.1:5055/api/health',
+    'http://a.bandcamp.com.evil.example/album/x',
+    'https://user:pw@www.youtube.com/watch?v=abc',
+])
+def test_validator_checks_the_real_host(url):
+    from backend.utils.validators import validate_url
+    ok, _, _ = validate_url(url)
+    assert not ok
+
+
+@pytest.mark.parametrize('url,platform', [
+    ('https://artist.bandcamp.com/album/x', 'bandcamp'),
+    ('https://www.youtube.com/watch?v=abc', 'youtube'),
+    ('youtu.be/abc', 'youtube'),
+    ('https://on.soundcloud.com/Xy7Kp2', 'soundcloud'),
+    ('spotify:album:4m2880jivSbbyEGAKfITCa', 'spotify'),
+    ('https://musicbrainz.org/release-group/1d9e8ed6-3893-4d3b-aa7d-6cd79609e386', 'spotify'),
+])
+def test_validator_still_accepts_real_links(url, platform):
+    from backend.utils.validators import validate_url
+    assert validate_url(url)[:2] == (True, platform)
+
+
+# BE-034: a watch link with &list= stays one video
+
+def test_single_video_extraction_and_download_ignore_the_list(tmp_path, monkeypatch):
+    import yt_dlp
+    from backend import metadata_handler
+
+    seen = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen.append(opts)
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {'title': 'T', 'duration': 10, 'uploader': 'U'}
+
+        def download(self, urls):
+            Path(self.opts['outtmpl'].replace('.%(ext)s', '.mp3')).write_bytes(b'a')
+
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYDL)
+    monkeypatch.setattr(metadata_handler.metadata_cache, 'get', lambda u: None)
+    monkeypatch.setattr(metadata_handler.metadata_cache, 'set', lambda *a, **k: None)
+    url = 'https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLVL9tujUubHRVV3MTeofrpCjW-Th3mRE1'
+    asyncio.run(metadata_handler.extract_metadata(url))
+    assert seen[-1].get('noplaylist') is True
+
+    monkeypatch.setattr(downloader.settings, 'UPLOAD_FOLDER', str(tmp_path))
+    asyncio.run(downloader.download_single(url, 'audio', 'mp3', '192',
+                                           {'title': 'T', 'artist': 'U'}))
+    assert seen[-1].get('noplaylist') is True
+
+
+# BE-035: a SoundCloud share link finds the uploader's real pages
+
+def test_soundcloud_share_link_uses_the_uploader_url():
+    from backend.discography import artist_pages
+    pages = artist_pages('https://on.soundcloud.com/Xy7Kp2',
+                         {'artist_url': 'https://soundcloud.com/realartist'})
+    assert pages[0] == 'https://soundcloud.com/realartist/albums'
+    assert artist_pages('https://on.soundcloud.com/Xy7Kp2', {}) == []

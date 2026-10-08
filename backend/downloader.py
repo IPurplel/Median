@@ -337,6 +337,9 @@ async def download_single(
                 )
 
     ydl_opts = get_ydl_opts(download_type, fmt, bitrate, temp_template + '.%(ext)s', make_cancel_hook(download_id, hook))
+    # A single download is one video even when its link carries &list= —
+    # without this yt-dlp fetched the entire playlist or Mix (BE-034).
+    ydl_opts['noplaylist'] = True
 
     # Matched sources (a Spotify track found on YouTube) carry ranked
     # runner-ups; everything else is just the one URL, and behaves as before.
