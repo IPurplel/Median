@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # same as the Docker image
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        # The defaults point at /app/..., which only exists in the container.
+        env:
+          UPLOAD_FOLDER: ${{ runner.temp }}/median/downloads
+          BACKUP_FOLDER: ${{ runner.temp }}/median/backups
+          LOG_FOLDER: ${{ runner.temp }}/median/logs
+          DATABASE_PATH: ${{ runner.temp }}/median/database/median.db
+          CUSTOM_COVER_DIR: ${{ runner.temp }}/median/covers
+        run: |
+          mkdir -p "$UPLOAD_FOLDER" "$BACKUP_FOLDER" "$LOG_FOLDER" "$(dirname "$DATABASE_PATH")" "$CUSTOM_COVER_DIR"
+          python -m pytest backend/tests -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check app.js syntax
+        run: node --check frontend/app.js

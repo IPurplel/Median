@@ -202,6 +202,17 @@ async def release_stale_batches():
 _STALE_PARTIAL_AGE = timedelta(hours=1)
 
 
+def _is_stale_mediafree_dir(folder: Path, cutoff: float) -> bool:
+    from backend.utils.file_organizer import MEDIA_EXTENSIONS
+
+    mtimes = [folder.stat().st_mtime]
+    for f in folder.rglob('*'):
+        if f.is_file() and f.suffix.lower().lstrip('.') in MEDIA_EXTENSIONS:
+            return False
+        mtimes.append(f.stat().st_mtime)
+    return max(mtimes) < cutoff
+
+
 def _sweep_stale_partials(max_age_seconds: Optional[float] = None) -> int:
     """Walk the download folder and delete stale leftovers. Blocking.
 
@@ -245,6 +256,14 @@ def _sweep_stale_partials(max_age_seconds: Optional[float] = None) -> int:
                                 and f.stat().st_mtime < cutoff):
                             f.unlink()
                             removed += 1
+                    # A folder with no media left — e.g. recreated by yt-dlp
+                    # writing a thumbnail just after a cancel deleted it
+                    # (BE-031) — is a leftover once nothing has touched it.
+                    # Dot-folders are Median's own caches (.cover_cache).
+                    if (not entry.name.startswith('.')
+                            and _is_stale_mediafree_dir(entry, cutoff)):
+                        shutil.rmtree(str(entry), ignore_errors=True)
+                        removed += 1
             except OSError as e:
                 app_logger.warning(f"Stale-partial sweep error for {entry}: {e}")
     except Exception as e:

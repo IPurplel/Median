@@ -7,6 +7,7 @@ from backend.db_models import get_db, row_to_dict
 from backend.downloader import (
     download_single, download_playlist,
     cleanup_partials, discard_temp_entries,
+    take_temp_entries, remove_temp_entries, late_cleanup_entries,
     request_cancel, _clear_cancel,
 )
 from backend.metadata_handler import extract_metadata
@@ -572,9 +573,12 @@ async def _run_download(download_id: str, download_params: dict):
         update_download_status(download_id, 'cancelled')
         download_states[download_id]['status'] = 'cancelled'
         app_logger.info(f"Download cancelled: {download_id[:8]}")
-        # The yt-dlp executor thread may still be writing; delete what's
-        # there now — the stale-partial sweep catches any late stragglers.
-        cleanup_partials(download_id)
+        # The yt-dlp executor thread may still be writing: delete what's there
+        # now, and again shortly after for what it writes before it notices
+        # the cancel — a thumbnail or the first .part chunk (BE-031).
+        entries = take_temp_entries(download_id)
+        remove_temp_entries(entries, download_id)
+        _schedule_late_cleanup(download_id, late_cleanup_entries(entries))
     except Exception as e:
         error_msg = str(e)
         cleanup_partials(download_id)
@@ -610,6 +614,27 @@ async def process_download(download_id: str, download_params: dict):
         await _run_download(download_id, download_params)
     finally:
         semaphore.release()
+
+
+# Seconds after a cancel at which the temp paths are swept again.
+LATE_CLEANUP_DELAYS = (10, 60)
+
+
+def _schedule_late_cleanup(download_id: str, entries: list):
+    if not entries:
+        return
+
+    async def sweep():
+        loop = asyncio.get_running_loop()
+        waited = 0
+        for delay in LATE_CLEANUP_DELAYS:
+            await asyncio.sleep(delay - waited)
+            waited = delay
+            await loop.run_in_executor(None, remove_temp_entries, entries, download_id)
+
+    t = asyncio.create_task(sweep())
+    _cleanup_tasks.add(t)
+    t.add_done_callback(_cleanup_tasks.discard)
 
 
 async def _deferred_state_cleanup(download_id: str, delay: int = 300):

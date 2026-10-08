@@ -1,5 +1,7 @@
 # 🎵 Median
 
+[![Tests](https://github.com/IPurplel/Median/actions/workflows/tests.yml/badge.svg)](https://github.com/IPurplel/Median/actions/workflows/tests.yml)
+
 > Self-hosted audio and video downloader. Paste a URL, pick a format, get your file.
 
 Supports **YouTube**, **SoundCloud**, **Bandcamp**, and **Spotify**\* — runs entirely on your own machine with Docker.
@@ -282,6 +284,17 @@ uvicorn backend.app:app --reload --port 5000
 ```
 
 The frontend is served directly by FastAPI — no build step needed.
+
+### Running the tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest backend/tests -q
+```
+
+Use the same path variables as above — the defaults point at `/app/...`,
+which only exists inside the container. The tests stub yt-dlp and ffmpeg, so
+no network is needed. GitHub Actions runs them on every push and pull request.
 
 ---
 

@@ -149,9 +149,11 @@ def init_db():
     # artist" click, so they can be tracked and zipped together afterwards
     if 'batch_id' not in cols:
         db.execute("ALTER TABLE downloads ADD COLUMN batch_id TEXT")
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_downloads_batch ON downloads(batch_id)"
-        )
+    # Outside the migration branch: a fresh install already has the column
+    # from CREATE TABLE, so the index used to be created only on upgrades.
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_downloads_batch ON downloads(batch_id)"
+    )
 
     # Migration: when a batch's combined zip was collected. Once the user has
     # the archive the server copies are redundant, so these are swept on a

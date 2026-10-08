@@ -858,3 +858,108 @@ def test_activity_labels_are_utc_dates(client):
     from datetime import datetime, timezone
     days = client.get('/api/statistics').json()['activity_7d']
     assert days[-1]['date'] == datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+
+# ── Leftover issues (2026-10-08, third round) ────────────────────────────────
+
+# BE-031: files yt-dlp writes just after a cancel are swept again
+
+def test_late_cleanup_only_touches_median_temp_names(tmp_path):
+    entries = [('stem', str(tmp_path / '_tmp_abc')), ('dir', str(tmp_path / '_concat_x')),
+               ('stem', str(tmp_path / 'Artist - Album.mp3')),
+               ('dir', str(tmp_path / 'Artist - Album'))]
+    kept = downloader.late_cleanup_entries(entries)
+    assert [Path(raw).name for _, raw in kept] == ['_tmp_abc', '_concat_x']
+
+
+def test_cancel_sweeps_again_for_late_writes(tmp_path, monkeypatch):
+    from backend import queue_manager
+
+    monkeypatch.setattr(queue_manager, 'LATE_CLEANUP_DELAYS', (0.05, 0.1))
+    stem = tmp_path / '_tmp_late'
+
+    async def scenario():
+        queue_manager._schedule_late_cleanup('be031', [('stem', str(stem))])
+        # The worker thread writes its thumbnail after the first cleanup ran.
+        (tmp_path / '_tmp_late.webp').write_bytes(b'x')
+        await asyncio.sleep(0.3)
+    asyncio.run(scenario())
+    assert not list(tmp_path.glob('_tmp_late*'))
+
+
+def test_stale_sweep_removes_media_free_album_folders(tmp_path, monkeypatch):
+    import os
+    import time
+    from backend import scheduler
+
+    monkeypatch.setattr(scheduler.settings, 'UPLOAD_FOLDER', str(tmp_path))
+    old = time.time() - 2 * 3600
+    leftover = tmp_path / 'A - B'
+    leftover.mkdir()
+    (leftover / '001 - x.webp').write_bytes(b'x')
+    album = tmp_path / 'C - D'
+    album.mkdir()
+    (album / '001 - Song.mp3').write_bytes(b'x')
+    cache = tmp_path / '.cover_cache'
+    cache.mkdir()
+    (cache / 'k.jpg').write_bytes(b'x')
+    for p in (leftover, album, cache, *leftover.iterdir(), *album.iterdir(), *cache.iterdir()):
+        os.utime(p, (old, old))
+
+    scheduler._sweep_stale_partials()
+    assert not leftover.exists()
+    assert album.exists() and cache.exists()
+
+
+# API-003: unknown /api paths are 404, not the web page
+
+def test_unknown_api_path_is_404_but_the_app_still_loads(client):
+    r = client.get('/api/does-not-exist')
+    assert r.status_code == 404 and r.json() == {'detail': 'Not found'}
+    assert client.get('/some/page').status_code == 200
+
+
+# BE-032: cover preview works without imghdr (removed in Python 3.13)
+
+def test_image_mime_is_sniffed_with_pillow(tmp_path):
+    from PIL import Image
+    from backend import app as app_module
+
+    png = tmp_path / 'cover.bin'
+    Image.new('RGB', (4, 4)).save(png, 'PNG')
+    assert app_module._sniff_image_mime(str(png)) == 'image/png'
+    assert app_module._sniff_image_mime(str(tmp_path / 'missing')) == 'image/jpeg'
+    assert 'import imghdr' not in Path(app_module.__file__).read_text(encoding='utf-8')
+
+
+# BE-033: the batch index exists on fresh installs too
+
+def test_batch_index_is_created_on_a_fresh_database(tmp_path, monkeypatch):
+    from backend import db_models
+
+    monkeypatch.setattr(db_models.settings, 'DATABASE_PATH', str(tmp_path / 'fresh.db'))
+    db_models.init_db()
+    db = db_models.get_db()
+    try:
+        names = {r['name'] for r in db.execute("PRAGMA index_list(downloads)")}
+    finally:
+        db.close()
+    assert 'idx_downloads_batch' in names
+
+
+# Validators moved to pydantic v2 keep their behaviour
+
+def test_v2_validators_behave_like_before():
+    from pydantic import ValidationError
+    from backend.app import DownloadRequest, CoverPreviewRequest
+
+    r = DownloadRequest(url='https://youtu.be/x', download_type='audio', format='mp3',
+                        selected_tracks=[3, 1, 3], crossfade_duration=999)
+    assert r.selected_tracks == [1, 3]
+    from backend.config import settings
+    assert r.crossfade_duration == settings.CROSSFADE_MAX_DURATION   # clamped
+    with pytest.raises(ValidationError):
+        DownloadRequest(url='https://youtu.be/x', download_type='audio', format='mp3',
+                        cover_id='not-a-uuid')
+    with pytest.raises(ValidationError):
+        CoverPreviewRequest(thumbnail_url='https://evil.example/x.jpg')
