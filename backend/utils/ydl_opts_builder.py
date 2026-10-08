@@ -27,7 +27,15 @@ def new_ydl(opts: dict):
     return ydl
 
 
-_BOT_CHECK_MARKERS = ('confirm you’re not a bot', "confirm you're not a bot")
+def is_bot_check(err) -> bool:
+    """YouTube's "Sign in to confirm you're not a bot" refusal.
+
+    It is aimed at the server's IP, not at one video: until cookies are
+    supplied every request fails the same way, so callers stop on the first
+    one instead of retrying, trying other candidates, or moving to the next
+    track — each of which is another request from a flagged address.
+    """
+    return 'not a bot' in str(err or '').lower()
 
 
 def explain_ydl_error(message: str) -> str:
@@ -35,7 +43,7 @@ def explain_ydl_error(message: str) -> str:
 
     yt-dlp's text tells the user to pass --cookies, which they can't do here.
     """
-    if not any(m in (message or '') for m in _BOT_CHECK_MARKERS):
+    if not is_bot_check(message):
         return message
     if cookies_file():
         return ("YouTube asked this server to sign in to prove it isn't a bot, "

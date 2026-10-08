@@ -19,7 +19,9 @@ from backend.concatenation_engine import (
 )
 from backend.image_processor import download_cover_image, save_cover_as
 from backend.logger import app_logger
-from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP, new_ydl
+from backend.utils.ydl_opts_builder import (
+    get_ydl_opts, FORMAT_EXT_MAP, new_ydl, is_bot_check, explain_ydl_error,
+)
 from backend.utils.tag_writer import write_tags
 from backend.utils.eta import JobEta, TrackWeights, normalize_ytdlp_eta
 
@@ -607,6 +609,10 @@ async def _fetch_with_fallback(
                 app_logger.warning(
                     f"{label} source {source_index + 1} attempt {attempt} failed: {e}"
                 )
+                # The bot check refuses this IP, not this video: another
+                # attempt or another source is refused too (BE-039).
+                if is_bot_check(e):
+                    raise
                 # A video that is gone will still be gone in two seconds —
                 # only retry when a fresh signature might actually help.
                 if _is_permanently_gone(e):
@@ -767,6 +773,17 @@ async def _download_each_track(
             from yt_dlp.utils import DownloadCancelled as _DC
             if isinstance(e, _DC):
                 raise
+            if is_bot_check(e):
+                # Every later track would be refused the same way. Keep what
+                # already downloaded; with nothing, fail with the real cause
+                # rather than "no media files" (BE-039).
+                if not results:
+                    raise
+                await _warn(
+                    progress_callback,
+                    f"{total - position} track(s) skipped: {explain_ydl_error(str(e))}",
+                )
+                break
             # Already logged per attempt. One unobtainable track is reported
             # below as a skip — it must not abandon the rest of the album.
             pass
@@ -1147,10 +1164,12 @@ async def download_playlist(
                     # the queue can still tell a dead album from a flaky network.
                     raise RuntimeError(track_errors.messages[0])
                 skipped = len(track_errors.messages)
+                first = track_errors.messages[0]
                 await _warn(
                     progress_callback,
                     f"{skipped} track(s) could not be downloaded and were "
-                    f"skipped: {_short_ydl_error(track_errors.messages[0])}"
+                    # yt-dlp's bot-check text suggests --cookies flags (BE-040).
+                    f"skipped: {explain_ydl_error(first) if is_bot_check(first) else _short_ydl_error(first)}"
                     + (" (and others)" if skipped > 1 else "")
                 )
 

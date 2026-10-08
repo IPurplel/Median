@@ -21,7 +21,7 @@ from typing import Optional
 
 from backend.config import settings
 from backend.logger import app_logger
-from backend.utils.ydl_opts_builder import new_ydl
+from backend.utils.ydl_opts_builder import new_ydl, is_bot_check
 
 # Below this, the caller warns the user that the match may be the wrong version.
 CONFIDENT = 0.55
@@ -349,6 +349,8 @@ def match_track_sync(title: str, artist: str, duration: int = 0) -> Optional[Mat
         try:
             verdict = _check_availability(url)
         except CandidateProbeError as e:
+            if is_bot_check(e.cause):
+                raise  # IP-wide: the next candidate is refused too (BE-038)
             probe_error = probe_error or e
             continue
         if verdict is not Availability.AVAILABLE:
@@ -389,15 +391,22 @@ async def match_all(tracks: list, on_progress=None,
     semaphore = asyncio.Semaphore(max(1, settings.SPOTIFY_MATCH_CONCURRENCY))
     done = [0]
     total = len(tracks)
+    # Set by the first bot-check refusal. It covers this IP, so the remaining
+    # tracks reuse that failure instead of each asking YouTube again (BE-038).
+    blocked: list = []
 
     async def _one(track):
         async with semaphore:
             try:
+                if blocked:
+                    raise blocked[0]
                 match = await match_track(
                     track.get('title', ''), track.get('artist', ''),
                     int(track.get('duration') or 0),
                 )
             except CandidateProbeError as e:
+                if is_bot_check(e.cause) and not blocked:
+                    blocked.append(e)
                 app_logger.warning(
                     f"Match verification failed for {track.get('title')!r}: {e}"
                 )

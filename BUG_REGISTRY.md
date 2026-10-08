@@ -811,3 +811,24 @@ Ruled out: the lyrics filename-containment fallback can pick a shorter title
 ("Love" inside "Love Me Do"), but it only runs when a file has no title tag,
 and Bandcamp tracks always carry one; `available_qualities` is computed from
 the first 20 formats only, but nothing reads it.
+
+## Bot-Check Follow-up — 2026-10-08
+
+Branch `fix/bot-check-followup`. A logical pass over YouTube's "Sign in to
+confirm you're not a bot" path after `YTDLP_COOKIES_FILE` (PR #7). The bot
+check refuses the server's IP rather than one video, but every layer treated
+it as a per-video failure. Fix commit: `046538c`. Full suite: 365 passed; the six
+new tests fail on the pre-fix code.
+
+| Bug ID | Severity | Area | Title | Fix | Regression test | Status |
+|---|---|---|---|---|---|---|
+| `BE-037` | Medium | Queue | A bot-check failure re-ran the whole job (not a permanent error), repeating every request | `'not a bot'` added to the permanent markers | `test_be037_bot_check_is_not_retried_as_a_job` | `Verified` — stubbed server: no "retrying once" |
+| `BE-038` | Medium | Spotify matching | After a bot check, each track still probed all 3 candidates and every other track was probed too (13-track album: ~78 requests) | First refusal is re-raised; `match_all` reuses it for the remaining tracks | `test_be038_match_track_stops_at_the_first_bot_check`, `test_be038_match_all_stops_probing_other_tracks` | `Verified` — stubbed server: 13-track album, 4 requests (those already in flight) |
+| `BE-039` | Medium | Downloads | Per-track downloads retried a bot check per attempt and per fallback source, then moved to the next track | Raised at once; the album keeps finished tracks and skips the rest with one warning, or fails with the real cause | `test_be039_fetch_does_not_retry_a_bot_check`, `test_be039_album_keeps_done_tracks_and_skips_the_rest` | `Fixed` (tests; live bot check not reproducible here) |
+| `BE-040` | Low | Warnings | Partial failures warned with yt-dlp's "--cookies" text, which can't be used in Median | Skipped-track and probe-failure warnings use `explain_ydl_error` | `test_be040_probe_failure_warning_carries_the_advice` | `Fixed` |
+| `DOC-001` | Low | README | Cookie setup said `docker compose up -d` (no rebuild, so the setting did nothing after updating) and didn't say the file must be readable by the non-root container user | `--build` and `chmod 644` added | — | `Fixed` |
+
+Ruled out: no yt-dlp use bypasses `new_ydl` (no CLI subprocess, no
+`from yt_dlp import`, enforced by a test); no `player_client` override that
+would ignore cookies; the Dockerfile copies only `backend/` and `frontend/`,
+so `cookies/` never enters the image.

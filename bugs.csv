@@ -56,3 +56,8 @@ FE-005,Low,P3,Frontend,Validation errors show [object Object],Verified
 FE-006,Medium,P2,Frontend,Original bitrate plus FLAC saves a non-FLAC file,Verified
 FE-007,Low,P3,Frontend,Blocked site storage stops the page script,Verified
 BE-036,Medium,P2,Cover art / tags,Covers embedded with the wrong image format,Verified
+BE-037,Medium,P2,Queue,Bot-check failure retried as a whole job,Verified
+BE-038,Medium,P2,Spotify matching,Bot check probed every candidate and track,Verified
+BE-039,Medium,P2,Downloads,Bot check retried per attempt and fallback source,Fixed
+BE-040,Low,P3,Warnings,Partial-failure warnings showed yt-dlp cookie flags,Fixed
+DOC-001,Low,P3,README,Cookie setup missed rebuild and file permissions,Fixed
