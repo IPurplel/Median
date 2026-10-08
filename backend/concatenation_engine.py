@@ -1,5 +1,6 @@
 import os
 import asyncio
+import functools
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
@@ -17,6 +18,42 @@ from backend.logger import app_logger
 # for the "Merge into single file" path and always forces a re-encode (the concat
 # demuxer's -c copy fast path cannot overlap streams). These builders are pure so
 # they can be unit-tested without ffmpeg.
+
+@functools.lru_cache(maxsize=1)
+def _vp9_encoder() -> str:
+    """Best VP9 encoder this ffmpeg build offers (cached probe)."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(['ffmpeg', '-encoders'], capture_output=True, text=True, timeout=5)
+        return 'libvpx-vp9' if 'libvpx-vp9' in r.stdout else 'libvpx'
+    except Exception:
+        return 'libvpx-vp9'
+
+
+def _merge_video_codecs(output_format: str, *, reencoded: bool) -> List[str]:
+    """Container-appropriate codec args for a video merge (BE-006).
+
+    WebM can only carry VP8/VP9 video and Vorbis/Opus audio — muxing
+    H.264/AAC into a `.webm` fails or yields a file players reject. MP4 and
+    MKV keep their historical argument lists exactly: ``reencoded`` marks the
+    crossfade path, which has always set ``-crf``/``-b:a`` itself, while the
+    hard-cut path never did.
+    """
+    fmt = (output_format or 'mp4').lower().lstrip('.')
+    if fmt == 'webm':
+        return [
+            '-c:v', _vp9_encoder(),
+            '-b:v', '0', '-crf', str(settings.VIDEO_CRF),
+            '-c:a', 'libopus', '-b:a', settings.AUDIO_BITRATE_DEFAULT,
+        ]
+    args = ['-c:v', settings.VIDEO_CODEC_H264, '-preset', settings.VIDEO_PRESET]
+    if reencoded:
+        args += ['-crf', str(settings.VIDEO_CRF)]
+    args += ['-c:a', settings.AUDIO_CODEC_AAC]
+    if reencoded:
+        args += ['-b:a', settings.AUDIO_BITRATE_DEFAULT]
+    return args
+
 
 def _crossfade_feasible(durations, crossfade_duration, max_tracks):
     """Return a usable crossfade duration, or None when crossfade isn't feasible.
@@ -301,9 +338,17 @@ async def concatenate_audio(
                         "its chapter marker will be a single point in time"
                     )
 
-            await loop.run_in_executor(
+            chapters_ok = await loop.run_in_executor(
                 None, add_chapters_to_file, output_path, tracks_meta, overlap
             )
+            if not chapters_ok:
+                # BE-008: the helper signals failure through its return value;
+                # ignoring it reported success on a file with no chapters.
+                await _notify_warning(
+                    progress_callback,
+                    "Chapter markers could not be added — the audio was saved "
+                    "without them",
+                )
 
         if progress_callback:
             await progress_callback(100, "Complete")
@@ -315,7 +360,8 @@ async def concatenate_audio(
         return False
 
 
-async def _run_crossfade_video(loop, input_files, output_path, crossfade_duration):
+async def _run_crossfade_video(loop, input_files, output_path, crossfade_duration,
+                               output_format: str = "mp4"):
     """Crossfade path for video: xfade (video) + acrossfade (audio) in one
     filter_complex so the two stay locked in sync (both shorten by D per join).
 
@@ -352,9 +398,7 @@ async def _run_crossfade_video(loop, input_files, output_path, crossfade_duratio
         '-filter_complex', filter_complex,
         '-map', f'[{vout}]', '-map', f'[{aout}]',
         '-map_chapters', '-1',
-        '-c:v', settings.VIDEO_CODEC_H264, '-preset', settings.VIDEO_PRESET,
-        '-crf', str(settings.VIDEO_CRF),
-        '-c:a', settings.AUDIO_CODEC_AAC, '-b:a', settings.AUDIO_BITRATE_DEFAULT,
+        *_merge_video_codecs(output_format, reencoded=True),
         '-pix_fmt', 'yuv420p',
         '-y', output_path,
     ]
@@ -379,11 +423,40 @@ async def concatenate_video(
     progress_callback: Optional[Callable] = None,
     crossfade: bool = False,
     crossfade_duration: Optional[float] = None,
+    tracks_meta: Optional[List[Dict]] = None,
 ) -> bool:
     if not input_files:
         return False
 
     loop = asyncio.get_running_loop()
+
+    async def _embed_chapters(overlap: float = 0.0):
+        """Write album chapter markers after a successful merge (BE-007).
+
+        The video path never received track metadata before, so merged videos
+        shipped without the chapters the audio path has always produced.
+        ``overlap`` is the crossfade length: each join pulls the timeline left
+        by that much, so the markers must move with it.
+        """
+        if not (tracks_meta and settings.CONCATENATION_CREATE_CHAPTERS
+                and len(tracks_meta) > 1):
+            return
+        if progress_callback:
+            await progress_callback(90, "Adding chapter markers...")
+        try:
+            ok = await loop.run_in_executor(
+                None, add_chapters_to_file, output_path, tracks_meta, overlap
+            )
+            if not ok:
+                # BE-008: a False return means the markers were not written —
+                # say so instead of reporting a clean success.
+                await _notify_warning(
+                    progress_callback,
+                    "Chapter markers could not be added — the video was saved "
+                    "without them",
+                )
+        except Exception as e:
+            app_logger.warning(f"Chapter embedding failed (non-fatal): {e}")
 
     if crossfade:
         cd = crossfade_duration if crossfade_duration is not None else settings.CROSSFADE_DURATION
@@ -399,7 +472,9 @@ async def concatenate_video(
         else:
             if progress_callback:
                 await progress_callback(10, "Crossfading video...")
-            if await _run_crossfade_video(loop, input_files, output_path, effective):
+            if await _run_crossfade_video(loop, input_files, output_path, effective,
+                                          output_format):
+                await _embed_chapters(effective)
                 if progress_callback:
                     await progress_callback(100, "Complete")
                 return True
@@ -420,9 +495,9 @@ async def concatenate_video(
                 '-f', 'concat',
                 '-safe', '0',
                 '-i', manifest_path,
-                '-c:v', settings.VIDEO_CODEC_H264,
-                '-preset', settings.VIDEO_PRESET,
-                '-c:a', settings.AUDIO_CODEC_AAC,
+                # Container-appropriate codecs: the old unconditional H.264/AAC
+                # broke WebM merges (BE-006).
+                *_merge_video_codecs(output_format, reencoded=False),
                 '-map_chapters', '-1',
                 '-y',
                 output_path
@@ -433,6 +508,8 @@ async def concatenate_video(
         if code != 0:
             app_logger.error(f"Video concat error: {stderr}")
             return False
+
+        await _embed_chapters()
 
         if progress_callback:
             await progress_callback(100, "Complete")
@@ -710,9 +787,16 @@ async def create_cover_audio_video(
                 if not track.get('duration'):
                     dur = get_media_duration(af) or 0
                     tracks_meta[i]['duration'] = dur
-            await loop.run_in_executor(
+            chapters_ok = await loop.run_in_executor(
                 None, add_chapters_to_file, output_path, tracks_meta, audio_overlap
             )
+            if not chapters_ok:
+                # BE-008: surface it to the user, not just the log.
+                await _notify_warning(
+                    progress_callback,
+                    "Chapter markers could not be added — the video was saved "
+                    "without them",
+                )
         except Exception as e:
             app_logger.warning(f"Chapter embedding failed (non-fatal): {e}")
 

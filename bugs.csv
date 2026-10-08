@@ -1,0 +1,23 @@
+Bug ID,Severity,Priority,Area,Title,Status
+CORE-001,High,P1,YouTube runtime / Docker,Container is missing the JavaScript challenge stack required for reliable current YouTube extraction,Fixed
+BE-001,High,P1,Spotify -> YouTube matching,YouTube extractor failures are misreported as song not found,Fixed
+CORE-002,High,P1,Dependency lifecycle,yt-dlp update logic does not match the way yt-dlp is installed in the container,Fixed
+BE-002,High,P1,Spotify album download / concatenate,Concatenated Spotify downloads bypass the normal retry and fallback-source path,Fixed
+FE-001,High,P1,Frontend / Authentication,Enabling MEDIAN_API_TOKEN breaks protected UI actions because the frontend never sends the bearer token,Fixed
+SEC-001,High,P1,API Authentication,Several mutating endpoints are not protected by the configured API token,Fixed
+SEC-002,High,P1,Rate limiting / Proxy trust,Rate limiting can be bypassed by spoofing X-Forwarded-For,Fixed
+SEC-003,High,P1,Cover uploads / Resource limits,Cover upload size is checked only after the whole request body is read,Fixed
+BE-003,Critical,P0,Download storage / Data integrity,Separate-track downloads of the same album reuse the same folder and can collide,Fixed
+BE-004,High,P1,Spotify fallback / Partial files,Fallback YouTube sources can reuse partial files created by a different source,Fixed
+BE-005,High,P1,YouTube video format selection,MP4 selector asks for bestaudio[ext=mp4] instead of M4A,Fixed
+BE-006,Critical,P0,Video concatenation,WebM merge path uses H.264 + AAC inside a .webm output,Fixed
+BE-007,Medium,P2,Video concatenation / Chapters,Merged video playlists do not get chapter markers,Fixed
+BE-008,Medium,P2,Audio concatenation / Chapters,Chapter embedding failure can be ignored while the download is still marked successful,Fixed
+FE-002,Medium,P2,Frontend / Error reporting,Real download error text is lost while the download state is still in memory,Fixed
+CORE-003,High,P1,Cancellation / Executor lifecycle,Cancelling a download does not stop the running yt-dlp executor thread,Fixed
+CORE-004,Medium,P2,Startup script,startup.sh does not read PORT from .env before probing the health endpoint,Fixed
+CORE-005,Low,P3,Startup script,Cleanup interval display includes the inline .env comment,Fixed
+BE-009,Medium,P2,Backup system,Two backups created in the same second can share the same ZIP filename/path,Fixed
+BE-010,Low,P3,Backup API,Backup selection parameter is accepted but ignored,Fixed
+BE-011,Medium,P2,Custom covers,"Uploaded custom covers have no cleanup, TTL, quota, or delete path",Fixed
+API-001,Medium,P2,Request validation,API accepts incompatible download_type + format combinations,Fixed

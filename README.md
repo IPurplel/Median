@@ -33,7 +33,7 @@ Supports **YouTube**, **SoundCloud**, **Bandcamp**, and **Spotify**\* — runs e
 | 📊 **Statistics** | Per-platform and per-artist download totals |
 | 💾 **Backups** | One-click backup and restore |
 | 🧹 **Auto-cleanup** | Files deleted after a configurable interval · mark files as "Keep" to exempt · discography batches are held until you collect the zip, then removed minutes later · a **Clean now** button frees everything immediately when the disk fills up, optionally including files Median has no record of, and always leaving in-progress downloads alone |
-| 🔄 **Auto-update** | yt-dlp updates itself on every startup |
+| 🔄 **Reproducible updates** | yt-dlp is pinned in the image — `docker compose build --pull` picks up a new release |
 | 🔒 **Optional Auth** | Protect your instance with a bearer token |
 
 ---
@@ -95,7 +95,6 @@ All options live in `.env`. None are required — the defaults are production-re
 | `BATCH_HOLD_HOURS` | `3` | Hours a finished discography batch is kept from auto-cleanup while waiting to be collected |
 | `BATCH_DELETE_MINUTES` | `3` | Minutes after the combined zip is downloaded before the server's album copies are deleted |
 | `MEDIAN_API_TOKEN` | _(unset)_ | Bearer token for the API — empty means no auth required |
-| `AUTO_UPDATE_INTERVAL` | `48` | Hours between scheduled yt-dlp updates |
 | `HISTORY_RETENTION_DAYS` | `90` | Days to keep history entries (0 = keep forever) |
 | `LOG_FORMAT` | `text` | `text` or `json` |
 
@@ -109,13 +108,18 @@ Set `MEDIAN_API_TOKEN` in `.env` to require a bearer token on all mutating endpo
 MEDIAN_API_TOKEN=your-secret-token
 ```
 
-Requests that start, cancel, or delete downloads must include:
+Every `POST`, `DELETE`, `PUT` or `PATCH` request under `/api/` must include:
 
 ```
 Authorization: Bearer your-secret-token
 ```
 
-The UI handles this automatically when a token is configured.
+Read-only `GET` endpoints (status, history, file downloads) stay open.
+
+The token is never baked into the UI. The first time the UI hits a protected
+action it asks for the token and remembers it in that browser
+(`localStorage`); a wrong or rotated token is forgotten on the next `401` and
+asked for again.
 
 ---
 
@@ -217,7 +221,7 @@ The full API is served at `/api/`. Key endpoints:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/health` | Server status, disk space, yt-dlp version |
+| `GET` | `/api/health` | Server status, disk space, yt-dlp version, YouTube challenge stack (EJS + deno) |
 | `GET` | `/api/platforms` | Platform reachability check |
 | `POST` | `/api/validate` | Validate a URL and fetch metadata |
 | `POST` | `/api/download` | Queue a download |

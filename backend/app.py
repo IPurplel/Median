@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, model_validator
 
 from backend.config import settings, validate_settings
 from backend.db_models import init_db, get_db, row_to_dict
@@ -44,6 +44,58 @@ def require_token(creds: HTTPAuthorizationCredentials = Security(_bearer)):
         raise HTTPException(401, "Unauthorized")
 
 
+# ── Upload body cap ───────────────────────────────────────────────────────────
+# The cover upload used to read the whole body before checking its size, and
+# nginx allowed unlimited bodies, so a multi-GB POST was fully ingested before
+# being rejected (SEC-003). FastAPI parses multipart forms before the handler
+# runs, so the cap has to sit below it: reject on Content-Length up front, and
+# count streamed bytes for chunked bodies that don't declare one.
+
+_UPLOAD_PATHS = ('/api/cover/upload',)
+# Multipart framing (boundaries, part headers) on top of the file itself.
+_MULTIPART_OVERHEAD = 64 * 1024
+
+
+class _UploadSizeLimit:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get('type') != 'http' or scope.get('method') != 'POST' \
+                or scope.get('path') not in _UPLOAD_PATHS:
+            return await self.app(scope, receive, send)
+
+        limit = settings.max_upload_size_bytes + _MULTIPART_OVERHEAD
+        declared = dict(scope.get('headers') or []).get(b'content-length')
+        if declared is not None:
+            try:
+                too_big = int(declared) > limit
+            except ValueError:
+                too_big = False
+            if too_big:
+                response = JSONResponse(
+                    {'detail': f'Image must be under {settings.MAX_UPLOAD_SIZE_MB} MB'},
+                    status_code=413,
+                )
+                return await response(scope, receive, send)
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get('type') == 'http.request':
+                received += len(message.get('body', b''))
+                if received > limit:
+                    # FastAPI re-raises HTTPException from body parsing as-is.
+                    raise HTTPException(
+                        413, f'Image must be under {settings.MAX_UPLOAD_SIZE_MB} MB'
+                    )
+            return message
+
+        return await self.app(scope, limited_receive, send)
+
+
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
 _rl_store: dict[str, list] = {}
@@ -68,10 +120,16 @@ def _rate_check(ip: str, limit: int = _RL_LIMIT, window: int = _RL_WINDOW) -> bo
 
 
 def _get_client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    # Trust only the immediate reverse proxy. Our nginx sets X-Real-IP from
+    # $remote_addr unconditionally (nginx.conf), overwriting anything the
+    # client sent. X-Forwarded-For must not be used: nginx *appends* to it,
+    # so the first entry stays client-controlled and rotating it rotates the
+    # rate-limit bucket (SEC-002). The backend port is not published outside
+    # the compose network, so only nginx can reach this header path.
+    real_ip = request.headers.get('X-Real-IP')
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else 'unknown'
 
 
 # ── Shared HTTP session ───────────────────────────────────────────────────────
@@ -99,21 +157,19 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": "Median/1.0"},
     )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "-U",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    # yt-dlp is pinned at build time (requirements.txt). Updates happen via
+    # image rebuild (`docker compose build`), never by mutating the running
+    # container — the runtime user is non-root and pip installs would not
+    # persist across restarts anyway.
+    app_logger.info("yt-dlp pinned at build time (update via image rebuild)")
+    ejs_ok, deno_path = _youtube_challenge_stack()
+    if not (ejs_ok and deno_path):
+        app_logger.warning(
+            "YouTube challenge stack incomplete "
+            f"(yt-dlp-ejs: {'ok' if ejs_ok else 'missing'}, "
+            f"deno: {deno_path or 'missing'}) — YouTube and Spotify downloads "
+            "may fail. Rebuild the image to restore it."
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode == 0:
-            app_logger.info("yt-dlp is up to date")
-        else:
-            app_logger.warning(f"yt-dlp update check failed: {stderr.decode()}")
-    except asyncio.TimeoutError:
-        app_logger.warning("yt-dlp update timed out — skipping")
-    except Exception as e:
-        app_logger.warning(f"yt-dlp update skipped: {e}")
 
     app_logger.info("Median ready")
 
@@ -138,6 +194,29 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+app.add_middleware(_UploadSizeLimit)
+
+
+# ── Mutation policy (router-wide auth) ────────────────────────────────────────
+# Per-route Depends(require_token) is easy to forget when adding a route, and
+# the gaps it left were exactly the state-changing endpoints attackers want
+# (SEC-001). This middleware closes the class of bug, not just the four
+# instances: any mutating /api request needs the bearer token when one is
+# configured. Read-only GETs stay open so health checks and status polling
+# keep working without credentials.
+
+_MUTATING_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+
+
+@app.middleware('http')
+async def _require_token_for_mutations(request: Request, call_next):
+    if _API_TOKEN and request.method in _MUTATING_METHODS \
+            and request.url.path.startswith('/api/'):
+        header = request.headers.get('Authorization', '')
+        token = header[7:] if header.lower().startswith('bearer ') else ''
+        if not secrets.compare_digest(token, _API_TOKEN):
+            return JSONResponse({'detail': 'Unauthorized'}, status_code=401)
+    return await call_next(request)
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -156,6 +235,13 @@ class CoverSettings(BaseModel):
     ratio: Literal["1:1", "16:9", "9:16", "4:3", "original"] = "1:1"
     resolution: Literal["low", "medium", "high", "original"] = "original"
     output_format: Literal["mp4", "mkv", "webm"] = "mp4"
+
+
+_FORMATS_BY_TYPE = {
+    "audio": ("mp3", "flac", "aac"),
+    "video": ("mp4", "mkv", "webm"),
+    "cover_audio": ("mp3",),
+}
 
 
 class DownloadRequest(BaseModel):
@@ -214,6 +300,20 @@ class DownloadRequest(BaseModel):
             raise ValueError("cover_id must be a valid UUID")
         return v
 
+    @model_validator(mode="after")
+    def format_matches_type(self):
+        # Each field was checked on its own, so "audio + mp4" or "video + mp3"
+        # got through and the downloader then searched for an extension it
+        # never produced (API-001). cover_audio fetches mp3 audio and renders
+        # the video container from cover_settings.output_format.
+        allowed = _FORMATS_BY_TYPE[self.download_type]
+        if self.format not in allowed:
+            raise ValueError(
+                f"format {self.format!r} is not valid for download_type "
+                f"{self.download_type!r} (expected one of: {', '.join(allowed)})"
+            )
+        return self
+
 
 class DiscographyRequest(BaseModel):
     url: str
@@ -250,7 +350,9 @@ class DiscographyDownloadRequest(DownloadRequest):
 
 
 class BackupRequest(BaseModel):
-    selection: str = "all"
+    # `selection` used to be accepted here and silently ignored — an API
+    # contract that lied about its behaviour (BE-010). Backups are scoped by
+    # date range only, so that is the whole contract now.
     date_from: Optional[str] = None
     date_to: Optional[str] = None
 
@@ -302,6 +404,21 @@ def _assert_within_cover_dir(path: Path):
         raise HTTPException(400, "Invalid cover_id")
 
 
+def _youtube_challenge_stack() -> tuple:
+    """(EJS scripts importable, path of the JS runtime yt-dlp will use).
+
+    Only deno is enabled by default in yt-dlp — node/bun need an explicit
+    --js-runtimes — so deno is the runtime that counts (CORE-001).
+    """
+    import importlib.util
+    import shutil
+    try:
+        ejs = importlib.util.find_spec("yt_dlp_ejs") is not None
+    except Exception:
+        ejs = False
+    return ejs, shutil.which("deno") or ""
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -333,6 +450,11 @@ async def health():
     except Exception:
         pass
 
+    # yt-dlp-ejs ships the YouTube challenge-solver scripts; yt-dlp needs a
+    # JS runtime (deno, from the image) to execute them. Both must be present.
+    ejs_available, js_runtime = _youtube_challenge_stack()
+    js_runtime_available = bool(js_runtime)
+
     status = "ok"
     if not db_ok:
         status = "degraded"
@@ -345,6 +467,10 @@ async def health():
         "db": db_ok,
         "disk_free_gb": round(disk.free / (1024**3), 2) if disk else 0,
         "yt_dlp_version": yt_dlp_version,
+        "ejs_available": ejs_available,
+        "js_runtime": js_runtime,
+        "js_runtime_available": js_runtime_available,
+        "youtube_challenges_ok": ejs_available and js_runtime_available,
         "active_downloads": len(active_downloads),
         "timestamp": datetime.now().isoformat(),
     }
@@ -1210,13 +1336,13 @@ async def download_events(download_id: str, request: Request):
     )
 
 
-@app.delete("/api/download/{download_id}")
+@app.delete("/api/download/{download_id}", dependencies=[Depends(require_token)])
 async def cancel(download_id: str):
     ok = cancel_download(download_id)
     return {"cancelled": ok}
 
 
-@app.post("/api/download/{download_id}/keep")
+@app.post("/api/download/{download_id}/keep", dependencies=[Depends(require_token)])
 async def set_keep(download_id: str, req: KeepFileRequest):
     db = get_db()
     try:
@@ -1846,7 +1972,7 @@ async def statistics():
 
 @app.post("/api/backup", dependencies=[Depends(require_token)])
 async def backup(req: BackupRequest):
-    result = await create_backup(req.selection, req.date_from, req.date_to)
+    result = await create_backup(req.date_from, req.date_to)
     return result
 
 
@@ -1952,7 +2078,7 @@ async def thumbnail_proxy(url: str = Query(...), request: Request = None):
         raise HTTPException(502, f"Could not fetch thumbnail: {e}")
 
 
-@app.post("/api/cover/upload")
+@app.post("/api/cover/upload", dependencies=[Depends(require_token)])
 async def upload_cover(file: UploadFile = File(...), request: Request = None):
     ip = _get_client_ip(request) if request else "unknown"
     if not _rate_check(ip, limit=20, window=60):
@@ -1960,7 +2086,9 @@ async def upload_cover(file: UploadFile = File(...), request: Request = None):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "File must be an image")
 
-    data = await file.read()
+    # Bounded read: never pull more than limit+1 bytes into memory, whatever
+    # the client claims. The ASGI body cap below stops the transfer itself.
+    data = await file.read(settings.max_upload_size_bytes + 1)
     if len(data) > settings.max_upload_size_bytes:
         raise HTTPException(400, f"Image must be under {settings.MAX_UPLOAD_SIZE_MB} MB")
 
@@ -1991,7 +2119,23 @@ async def serve_cover(cover_id: str):
     return FileResponse(str(match_path))
 
 
-@app.post("/api/cover/preview")
+@app.delete("/api/cover/upload/{cover_id}", dependencies=[Depends(require_token)])
+async def delete_cover(cover_id: str):
+    if not is_valid_uuid(cover_id):
+        raise HTTPException(400, "Invalid cover_id")
+    cover_dir = CUSTOM_COVER_DIR.resolve()
+    removed = 0
+    for match in cover_dir.glob(f"{cover_id}.*"):
+        _assert_within_cover_dir(match.resolve())
+        try:
+            match.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return {"deleted": removed > 0}
+
+
+@app.post("/api/cover/preview", dependencies=[Depends(require_token)])
 async def cover_preview(req: CoverPreviewRequest, request: Request = None):
     from backend.image_processor import (
         download_cover_image, process_cover_image, get_target_dimensions

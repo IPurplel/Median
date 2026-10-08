@@ -15,12 +15,14 @@ FROM python:3.11-alpine
 LABEL maintainer="Median Audio Downloader"
 LABEL description="Self-hosted audio downloader for YouTube, SoundCloud, Bandcamp"
 
-# System deps
+# System deps (deno provides the JS runtime yt-dlp needs for YouTube
+# signature challenges; installed system-wide so the median user can run it)
 RUN apk add --no-cache \
     ffmpeg \
     curl \
     ca-certificates \
     tzdata \
+    deno \
     && rm -rf /var/cache/apk/*
 
 # Copy installed Python packages from builder

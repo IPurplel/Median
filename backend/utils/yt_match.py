@@ -16,6 +16,7 @@ CONFIDENT is reported to the user rather than silently accepted.
 """
 import asyncio
 import re
+from enum import Enum
 from typing import Optional
 
 from backend.config import settings
@@ -157,8 +158,13 @@ def _search(query: str, limit: int) -> list:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f'ytsearch{limit}:{query}', download=False)
     except Exception as e:
+        # A failed search proves nothing about whether the song exists, so it
+        # must not come back as an empty result list (BE-001).
         app_logger.warning(f"YouTube search failed for {query!r}: {e}")
-        return []
+        verdict = _classify_probe_error(e)
+        if verdict is Availability.CONTENT_UNAVAILABLE:
+            verdict = Availability.EXTRACTOR_FAILURE
+        raise CandidateProbeError(f'ytsearch:{query}', verdict, str(e)) from e
     return [e for e in (info or {}).get('entries') or [] if e]
 
 
@@ -194,14 +200,58 @@ def _candidate_url(candidate: dict) -> str:
     return candidate.get('url') or f"https://www.youtube.com/watch?v={candidate.get('id')}"
 
 
+# The verification verdict for one candidate: the download check no longer
+# answers yes/no. YouTube fails in distinguishable ways — the video is really
+# gone (removed/private/region-locked), yt-dlp's extractor broke on a page
+# change, or the network dropped mid-probe — and the caller reports each
+# differently instead of lumping every failure under "song not found".
+class Availability(Enum):
+    AVAILABLE = 'available'
+    CONTENT_UNAVAILABLE = 'content_unavailable'
+    EXTRACTOR_FAILURE = 'extractor_failure'
+    NETWORK_FAILURE = 'network_failure'
+
+    def __bool__(self) -> bool:
+        return self is Availability.AVAILABLE
+
+
+class CandidateProbeError(Exception):
+    """Verifying a candidate failed for an infrastructure reason (BE-001).
+
+    The video's real availability is unknown — the extractor broke or the
+    network dropped — so callers must surface this instead of reporting the
+    track as "not found on YouTube".
+    """
+
+    def __init__(self, url: str, verdict: Availability, cause: str = ''):
+        self.url = url
+        self.verdict = verdict
+        self.cause = cause or verdict.value
+        super().__init__(
+            f"YouTube verification failed ({verdict.value}) for {url}: {self.cause}"
+        )
+
+
 def _is_downloadable(url: str) -> bool:
+    """Back-compat wrapper: True only when the video can actually be fetched.
+
+    Infrastructure failures count as False here; callers that need to tell
+    them apart must use :func:`_check_availability`.
+    """
+    try:
+        return bool(_check_availability(url))
+    except CandidateProbeError:
+        return False
+
+
+def _check_availability(url: str) -> Availability:
     """Can this actually be fetched, or does it only *appear* in search?
 
-    A flat search lists videos that are region-locked, removed, or otherwise
-    unplayable — YouTube keeps them in the index. Taking the top-scoring result
-    on faith fails often enough to look broken (two of three tracks on the
-    first real album tested), so the chosen candidate is confirmed before it is
-    handed to the downloader.
+    Returns ``AVAILABLE`` or ``CONTENT_UNAVAILABLE`` — the only two verdicts
+    that describe the *video*. Anything else (extractor breakage, network
+    failure) raises :class:`CandidateProbeError` carrying the classified
+    cause, because a probing failure says nothing about whether the song
+    exists (BE-001).
     """
     import yt_dlp
 
@@ -212,10 +262,41 @@ def _is_downloadable(url: str) -> bool:
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-        return bool(info)
+        return Availability.AVAILABLE if info else Availability.CONTENT_UNAVAILABLE
     except Exception as e:
-        app_logger.debug(f"Candidate unavailable {url}: {e}")
-        return False
+        verdict = _classify_probe_error(e)
+        if verdict is Availability.CONTENT_UNAVAILABLE:
+            app_logger.debug(f"Candidate gone {url}: {e}")
+            return Availability.CONTENT_UNAVAILABLE
+        app_logger.warning(f"YouTube probe failed for {url}: {e}")
+        raise CandidateProbeError(url, verdict, str(e)) from e
+
+
+_CONTENT_GONE_MARKERS = (
+    'video unavailable', 'is not available', 'is unavailable',
+    'private video', 'members-only', 'removed by the uploader',
+    'has been terminated', 'sign in to confirm your age',
+    'requested format is not available', 'no video formats found',
+    'video has been removed', 'not made this video available',
+    'unsupported url',
+)
+
+_NETWORK_MARKERS = (
+    'timeout', 'timed out', 'connection reset', 'connection aborted',
+    'network is unreachable', 'name resolution', 'temporary failure',
+    'http error 5', 'http error 429', 'too many requests',
+    'socket', 'ssl', 'urlopen error',
+)
+
+
+def _classify_probe_error(err: Exception) -> Availability:
+    """Map a probe exception onto an Availability verdict."""
+    message = str(err).lower()
+    if any(marker in message for marker in _CONTENT_GONE_MARKERS):
+        return Availability.CONTENT_UNAVAILABLE
+    if any(marker in message for marker in _NETWORK_MARKERS):
+        return Availability.NETWORK_FAILURE
+    return Availability.EXTRACTOR_FAILURE
 
 
 def match_track_sync(title: str, artist: str, duration: int = 0) -> Optional[Match]:
@@ -258,8 +339,18 @@ def match_track_sync(title: str, artist: str, duration: int = 0) -> Optional[Mat
             seen.add(url)
             ordered.append((score, candidate, url))
 
+    # A probe that fails for an infrastructure reason (extractor/network)
+    # still lets the next candidate be tried — one flaky request shouldn't
+    # cost the track. But if nothing verifies and any probe failed that way,
+    # the result is "unknown", not "not found", and is raised as such (BE-001).
+    probe_error = None
     for i, (score, candidate, url) in enumerate(ordered[:settings.YT_MATCH_VERIFY]):
-        if not _is_downloadable(url):
+        try:
+            verdict = _check_availability(url)
+        except CandidateProbeError as e:
+            probe_error = probe_error or e
+            continue
+        if verdict is not Availability.AVAILABLE:
             continue
         return Match(
             url=url,
@@ -269,6 +360,8 @@ def match_track_sync(title: str, artist: str, duration: int = 0) -> Optional[Mat
             duration=int(candidate.get('duration') or 0),
             alternatives=[u for _, _, u in ordered[i + 1:]][:settings.YT_MATCH_FALLBACKS],
         )
+    if probe_error is not None:
+        raise probe_error
     return None
 
 
@@ -279,12 +372,18 @@ async def match_track(title: str, artist: str, duration: int = 0) -> Optional[Ma
     )
 
 
-async def match_all(tracks: list, on_progress=None) -> list:
+async def match_all(tracks: list, on_progress=None,
+                    failures: Optional[list] = None) -> list:
     """Match every track, a few at a time. Results align 1:1 with `tracks`.
 
     Bounded concurrency: searches are quick but each spawns a thread, and an
     unbounded gather over a 100-track playlist would swamp the executor the
     downloads themselves need.
+
+    ``failures`` is an optional collector: when provided, tracks whose
+    *verification* failed for infrastructure reasons (extractor/network) are
+    appended as ``(track, CandidateProbeError)`` so the caller can report
+    them separately from tracks that simply could not be found (BE-001).
     """
     semaphore = asyncio.Semaphore(max(1, settings.SPOTIFY_MATCH_CONCURRENCY))
     done = [0]
@@ -297,6 +396,13 @@ async def match_all(tracks: list, on_progress=None) -> list:
                     track.get('title', ''), track.get('artist', ''),
                     int(track.get('duration') or 0),
                 )
+            except CandidateProbeError as e:
+                app_logger.warning(
+                    f"Match verification failed for {track.get('title')!r}: {e}"
+                )
+                if failures is not None:
+                    failures.append((track, e))
+                match = None
             except Exception as e:
                 app_logger.warning(
                     f"Match failed for {track.get('title')!r}: {e}"

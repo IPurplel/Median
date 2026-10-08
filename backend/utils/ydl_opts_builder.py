@@ -94,10 +94,14 @@ def get_ydl_opts(
                 opts['format'] = 'bestvideo+bestaudio/best'
             opts['merge_output_format'] = 'mkv'
         else:
+            # The audio side of an MP4 is M4A, not MP4: YouTube serves
+            # audio-only streams as m4a, so `bestaudio[ext=mp4]` matches no
+            # audio-only candidate and silently drops the whole selection to a
+            # combined progressive MP4 of usually worse quality (BE-005).
             if bitrate_val:
-                opts['format'] = f'bestvideo[ext=mp4]+bestaudio[ext=mp4][abr<={bitrate_val}]/bestvideo[ext=mp4]+bestaudio[ext=mp4]/best[ext=mp4]/best'
+                opts['format'] = f'bestvideo[ext=mp4]+bestaudio[ext=m4a][abr<={bitrate_val}]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
             else:
-                opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=mp4]/best[ext=mp4]/best'
+                opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best'
             opts['merge_output_format'] = 'mp4'
 
         # Embed the thumbnail as cover art: mp4 carries it in the covr atom,
