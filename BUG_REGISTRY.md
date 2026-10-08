@@ -795,3 +795,19 @@ produce a wrong pick in practice; empty Spotify/MusicBrainz discographies are
 cached only for a genuine "no albums" answer (a MusicBrainz failure is not
 cached).
 
+
+## Fourth Round — 2026-10-08
+
+Branch `fix/bug-hunt-4`. Read `tag_writer.py`, `image_processor.py`,
+`cache_manager.py`, `ydl_opts_builder.py`, `config.py`, `logger.py` and the
+rest of `metadata_handler.py`. Fix commit: `4cbf496`. Full suite: 355 passed;
+the new tests fail on the pre-fix code (10 of 10).
+
+| Bug ID | Severity | Area | Title | Fix | Regression test | Status |
+|---|---|---|---|---|---|---|
+| `BE-036` | Medium | Cover art / tags | Cover format was guessed from the file name: YouTube's WebP thumbnails (saved as `_cover.jpg`) and uploaded `.webp`/`.gif` covers were embedded labelled as JPEG, so ffmpeg and players could not decode the art ("No JPEG data found in image"); the album sidecar `cover.jpg` got WebP bytes too | Tags take JPEG/PNG by real content and re-encode anything else as JPEG; downloaded covers and the sidecar are converted to match their name | `test_be036_cover_embedded_in_its_real_format`, `test_be036_sidecar_and_download_are_converted` | `Verified` — real server: WebP upload → cover+audio MP4 `covr` decodes as JPEG; live YouTube `.webp` thumbnail saved as a real JPEG |
+
+Ruled out: the lyrics filename-containment fallback can pick a shorter title
+("Love" inside "Love Me Do"), but it only runs when a file has no title tag,
+and Bandcamp tracks always carry one; `available_qualities` is computed from
+the first 20 formats only, but nothing reads it.
