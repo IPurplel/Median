@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from backend.config import settings, validate_settings
 from backend.db_models import init_db, get_db, row_to_dict
@@ -224,7 +224,8 @@ async def _require_token_for_mutations(request: Request, call_next):
 class ValidateRequest(BaseModel):
     url: str
 
-    @validator("url")
+    @field_validator("url")
+    @classmethod
     def url_length(cls, v):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
@@ -259,13 +260,15 @@ class DownloadRequest(BaseModel):
     # track — only a partial selection needs to be sent.
     selected_tracks: Optional[List[int]] = None
 
-    @validator("url")
+    @field_validator("url")
+    @classmethod
     def url_length(cls, v):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
         return v
 
-    @validator("selected_tracks")
+    @field_validator("selected_tracks")
+    @classmethod
     def selected_tracks_valid(cls, v):
         if not v:
             return None
@@ -278,14 +281,16 @@ class DownloadRequest(BaseModel):
             )
         return cleaned
 
-    @validator("crossfade_duration")
+    @field_validator("crossfade_duration")
+    @classmethod
     def crossfade_duration_valid(cls, v):
         # Clamp to the configured bounds rather than reject — the UI slider stays
         # within range, but a stray value shouldn't fail the whole request.
         lo, hi = settings.CROSSFADE_MIN_DURATION, settings.CROSSFADE_MAX_DURATION
         return max(lo, min(hi, v))
 
-    @validator("bitrate")
+    @field_validator("bitrate")
+    @classmethod
     def bitrate_valid(cls, v):
         if v:
             try:
@@ -294,7 +299,8 @@ class DownloadRequest(BaseModel):
                 raise ValueError(str(e))
         return v
 
-    @validator("cover_id")
+    @field_validator("cover_id")
+    @classmethod
     def cover_id_format(cls, v):
         if v and not is_valid_uuid(v):
             raise ValueError("cover_id must be a valid UUID")
@@ -318,7 +324,8 @@ class DownloadRequest(BaseModel):
 class DiscographyRequest(BaseModel):
     url: str
 
-    @validator("url")
+    @field_validator("url")
+    @classmethod
     def url_length(cls, v):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
@@ -329,13 +336,15 @@ class DiscographyAlbum(BaseModel):
     url: str
     title: str = ""
 
-    @validator("url")
+    @field_validator("url")
+    @classmethod
     def url_length(cls, v):
         if len(v) > settings.MAX_URL_LENGTH:
             raise ValueError(f"URL exceeds maximum length of {settings.MAX_URL_LENGTH}")
         return v
 
-    @validator("title")
+    @field_validator("title")
+    @classmethod
     def title_length(cls, v):
         return (v or "")[:300]
 
@@ -367,7 +376,8 @@ class CoverPreviewRequest(BaseModel):
     ratio: str = "1:1"
     resolution: str = "original"
 
-    @validator("thumbnail_url")
+    @field_validator("thumbnail_url")
+    @classmethod
     def must_be_allowed_host(cls, v):
         if v is None:
             return v
@@ -377,7 +387,8 @@ class CoverPreviewRequest(BaseModel):
             raise ValueError("thumbnail_url host not permitted")
         return v
 
-    @validator("cover_id")
+    @field_validator("cover_id")
+    @classmethod
     def cover_id_format(cls, v):
         if v and not is_valid_uuid(v):
             raise ValueError("cover_id must be a valid UUID")
@@ -2152,13 +2163,21 @@ async def delete_cover(cover_id: str):
     return {"deleted": removed > 0}
 
 
+def _sniff_image_mime(path: str) -> str:
+    """MIME type from the image's own bytes; JPEG if it can't be read."""
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as im:
+            return _PILImage.MIME.get(im.format, 'image/jpeg')
+    except Exception:
+        return 'image/jpeg'
+
+
 @app.post("/api/cover/preview", dependencies=[Depends(require_token)])
 async def cover_preview(req: CoverPreviewRequest, request: Request = None):
     from backend.image_processor import (
         download_cover_image, process_cover_image, get_target_dimensions
     )
-    import imghdr
-
     ip = _get_client_ip(request) if request else "unknown"
     if not _rate_check(ip, limit=20, window=60):
         raise HTTPException(429, "Too many requests — please wait")
@@ -2201,8 +2220,8 @@ async def cover_preview(req: CoverPreviewRequest, request: Request = None):
                     '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
         mime_type = mime_map.get(ext)
         if not mime_type:
-            detected = imghdr.what(None, h=raw[:32])
-            mime_type = f'image/{detected}' if detected else 'image/jpeg'
+            # Pillow rather than imghdr, which Python 3.13 removed.
+            mime_type = _sniff_image_mime(processed)
 
         size = os.path.getsize(processed)
 
@@ -2246,4 +2265,8 @@ if frontend_path.exists():
     @app.get("/", include_in_schema=False)
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_frontend(full_path: str = ""):
+        # The SPA fallback must not swallow API typos: an unknown /api/ path
+        # answered 200 with index.html, which clients then failed to parse.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(404, "Not found")
         return FileResponse(str(frontend_path / "index.html"))

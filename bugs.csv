@@ -44,4 +44,14 @@ BE-027,Low,P3,Backups,Full backups include the cover cache and temp folders,Fixe
 BE-028,Low,P3,Storage,Same artist/title downloads can overwrite each other,Fixed
 BE-029,Low,P3,Statistics,Activity chart labels use local time against UTC rows,Fixed
 BE-030,Low,P3,Chapters / Covers,Chapter pass drops the cover attachment from merged cover+audio MKV,Verified
-BE-031,Low,P3,Cancel / Storage,Late yt-dlp writes after a cancel leave temp files until the stale sweep,Confirmed
+BE-031,Low,P3,Cancel / Storage,Late yt-dlp writes after a cancel leave temp files until the stale sweep,Verified
+API-003,Low,P3,API,Unknown /api paths return the web page with 200,Verified
+BE-032,Low,P3,Cover preview,Cover preview imports imghdr (removed in Python 3.13),Verified
+BE-033,Low,P3,Database,Batch index never created on fresh installs,Fixed
+SEC-005,High,P1,URL validation,Prefix-only platform patterns let other hosts pass validation,Verified
+BE-034,High,P1,YouTube,Watch links with &list= download the whole playlist,Verified
+BE-035,Low,P3,Discography,SoundCloud share links resolve the wrong artist page,Fixed
+FE-004,Medium,P2,Frontend,Running downloads invisible after a page refresh,Verified
+FE-005,Low,P3,Frontend,Validation errors show [object Object],Verified
+FE-006,Medium,P2,Frontend,Original bitrate plus FLAC saves a non-FLAC file,Verified
+FE-007,Low,P3,Frontend,Blocked site storage stops the page script,Verified

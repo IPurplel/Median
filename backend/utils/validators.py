@@ -147,4 +147,26 @@ def validate_url(url: str, max_length: int = 2048) -> Tuple[bool, Optional[str],
             "Bandcamp, Spotify"
         )
 
+    # The patterns only match a prefix, so "x.bandcamp.com@127.0.0.1/" and
+    # "a.bandcamp.com.evil.net/" passed as Bandcamp while pointing somewhere
+    # else entirely (SEC-005). The real host has to belong to the platform.
+    if parsed.username or parsed.password or not _host_belongs_to(parsed.hostname, platform):
+        return False, None, "That link doesn't point at a supported site"
+
     return True, platform, None
+
+
+_PLATFORM_HOSTS = {
+    'youtube': ('youtube.com', 'youtu.be'),
+    'soundcloud': ('soundcloud.com',),
+    'bandcamp': ('bandcamp.com',),
+    'spotify': ('spotify.com', 'musicbrainz.org'),
+}
+
+
+def _host_belongs_to(host: Optional[str], platform: str) -> bool:
+    host = (host or '').lower().rstrip('.')
+    return any(
+        host == domain or host.endswith('.' + domain)
+        for domain in _PLATFORM_HOSTS.get(platform, ())
+    )

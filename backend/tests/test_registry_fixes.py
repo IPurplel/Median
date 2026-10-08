@@ -858,3 +858,184 @@ def test_activity_labels_are_utc_dates(client):
     from datetime import datetime, timezone
     days = client.get('/api/statistics').json()['activity_7d']
     assert days[-1]['date'] == datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+
+# ── Leftover issues (2026-10-08, third round) ────────────────────────────────
+
+# BE-031: files yt-dlp writes just after a cancel are swept again
+
+def test_late_cleanup_only_touches_median_temp_names(tmp_path):
+    entries = [('stem', str(tmp_path / '_tmp_abc')), ('dir', str(tmp_path / '_concat_x')),
+               ('stem', str(tmp_path / 'Artist - Album.mp3')),
+               ('dir', str(tmp_path / 'Artist - Album'))]
+    kept = downloader.late_cleanup_entries(entries)
+    assert [Path(raw).name for _, raw in kept] == ['_tmp_abc', '_concat_x']
+
+
+def test_cancel_sweeps_again_for_late_writes(tmp_path, monkeypatch):
+    from backend import queue_manager
+
+    monkeypatch.setattr(queue_manager, 'LATE_CLEANUP_DELAYS', (0.05, 0.1))
+    stem = tmp_path / '_tmp_late'
+
+    async def scenario():
+        queue_manager._schedule_late_cleanup('be031', [('stem', str(stem))])
+        # The worker thread writes its thumbnail after the first cleanup ran.
+        (tmp_path / '_tmp_late.webp').write_bytes(b'x')
+        await asyncio.sleep(0.3)
+    asyncio.run(scenario())
+    assert not list(tmp_path.glob('_tmp_late*'))
+
+
+def test_stale_sweep_removes_media_free_album_folders(tmp_path, monkeypatch):
+    import os
+    import time
+    from backend import scheduler
+
+    monkeypatch.setattr(scheduler.settings, 'UPLOAD_FOLDER', str(tmp_path))
+    old = time.time() - 2 * 3600
+    leftover = tmp_path / 'A - B'
+    leftover.mkdir()
+    (leftover / '001 - x.webp').write_bytes(b'x')
+    album = tmp_path / 'C - D'
+    album.mkdir()
+    (album / '001 - Song.mp3').write_bytes(b'x')
+    cache = tmp_path / '.cover_cache'
+    cache.mkdir()
+    (cache / 'k.jpg').write_bytes(b'x')
+    for p in (leftover, album, cache, *leftover.iterdir(), *album.iterdir(), *cache.iterdir()):
+        os.utime(p, (old, old))
+
+    scheduler._sweep_stale_partials()
+    assert not leftover.exists()
+    assert album.exists() and cache.exists()
+
+
+# API-003: unknown /api paths are 404, not the web page
+
+def test_unknown_api_path_is_404_but_the_app_still_loads(client):
+    r = client.get('/api/does-not-exist')
+    assert r.status_code == 404 and r.json() == {'detail': 'Not found'}
+    assert client.get('/some/page').status_code == 200
+
+
+# BE-032: cover preview works without imghdr (removed in Python 3.13)
+
+def test_image_mime_is_sniffed_with_pillow(tmp_path):
+    from PIL import Image
+    from backend import app as app_module
+
+    png = tmp_path / 'cover.bin'
+    Image.new('RGB', (4, 4)).save(png, 'PNG')
+    assert app_module._sniff_image_mime(str(png)) == 'image/png'
+    assert app_module._sniff_image_mime(str(tmp_path / 'missing')) == 'image/jpeg'
+    assert 'import imghdr' not in Path(app_module.__file__).read_text(encoding='utf-8')
+
+
+# BE-033: the batch index exists on fresh installs too
+
+def test_batch_index_is_created_on_a_fresh_database(tmp_path, monkeypatch):
+    from backend import db_models
+
+    monkeypatch.setattr(db_models.settings, 'DATABASE_PATH', str(tmp_path / 'fresh.db'))
+    db_models.init_db()
+    db = db_models.get_db()
+    try:
+        names = {r['name'] for r in db.execute("PRAGMA index_list(downloads)")}
+    finally:
+        db.close()
+    assert 'idx_downloads_batch' in names
+
+
+# Validators moved to pydantic v2 keep their behaviour
+
+def test_v2_validators_behave_like_before():
+    from pydantic import ValidationError
+    from backend.app import DownloadRequest, CoverPreviewRequest
+
+    r = DownloadRequest(url='https://youtu.be/x', download_type='audio', format='mp3',
+                        selected_tracks=[3, 1, 3], crossfade_duration=999)
+    assert r.selected_tracks == [1, 3]
+    from backend.config import settings
+    assert r.crossfade_duration == settings.CROSSFADE_MAX_DURATION   # clamped
+    with pytest.raises(ValidationError):
+        DownloadRequest(url='https://youtu.be/x', download_type='audio', format='mp3',
+                        cover_id='not-a-uuid')
+    with pytest.raises(ValidationError):
+        CoverPreviewRequest(thumbnail_url='https://evil.example/x.jpg')
+
+
+# ── Third bug hunt (2026-10-08) ──────────────────────────────────────────────
+
+# SEC-005: a supported-looking prefix can't smuggle in another host
+
+@pytest.mark.parametrize('url', [
+    'https://x.bandcamp.com@127.0.0.1:5055/api/health',
+    'http://a.bandcamp.com.evil.example/album/x',
+    'https://user:pw@www.youtube.com/watch?v=abc',
+])
+def test_validator_checks_the_real_host(url):
+    from backend.utils.validators import validate_url
+    ok, _, _ = validate_url(url)
+    assert not ok
+
+
+@pytest.mark.parametrize('url,platform', [
+    ('https://artist.bandcamp.com/album/x', 'bandcamp'),
+    ('https://www.youtube.com/watch?v=abc', 'youtube'),
+    ('youtu.be/abc', 'youtube'),
+    ('https://on.soundcloud.com/Xy7Kp2', 'soundcloud'),
+    ('spotify:album:4m2880jivSbbyEGAKfITCa', 'spotify'),
+    ('https://musicbrainz.org/release-group/1d9e8ed6-3893-4d3b-aa7d-6cd79609e386', 'spotify'),
+])
+def test_validator_still_accepts_real_links(url, platform):
+    from backend.utils.validators import validate_url
+    assert validate_url(url)[:2] == (True, platform)
+
+
+# BE-034: a watch link with &list= stays one video
+
+def test_single_video_extraction_and_download_ignore_the_list(tmp_path, monkeypatch):
+    import yt_dlp
+    from backend import metadata_handler
+
+    seen = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen.append(opts)
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {'title': 'T', 'duration': 10, 'uploader': 'U'}
+
+        def download(self, urls):
+            Path(self.opts['outtmpl'].replace('.%(ext)s', '.mp3')).write_bytes(b'a')
+
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYDL)
+    monkeypatch.setattr(metadata_handler.metadata_cache, 'get', lambda u: None)
+    monkeypatch.setattr(metadata_handler.metadata_cache, 'set', lambda *a, **k: None)
+    url = 'https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLVL9tujUubHRVV3MTeofrpCjW-Th3mRE1'
+    asyncio.run(metadata_handler.extract_metadata(url))
+    assert seen[-1].get('noplaylist') is True
+
+    monkeypatch.setattr(downloader.settings, 'UPLOAD_FOLDER', str(tmp_path))
+    asyncio.run(downloader.download_single(url, 'audio', 'mp3', '192',
+                                           {'title': 'T', 'artist': 'U'}))
+    assert seen[-1].get('noplaylist') is True
+
+
+# BE-035: a SoundCloud share link finds the uploader's real pages
+
+def test_soundcloud_share_link_uses_the_uploader_url():
+    from backend.discography import artist_pages
+    pages = artist_pages('https://on.soundcloud.com/Xy7Kp2',
+                         {'artist_url': 'https://soundcloud.com/realartist'})
+    assert pages[0] == 'https://soundcloud.com/realartist/albums'
+    assert artist_pages('https://on.soundcloud.com/Xy7Kp2', {}) == []

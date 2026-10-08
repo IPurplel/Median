@@ -134,9 +134,30 @@ def cleanup_partials(download_id: str) -> int:
     Returns the number of filesystem entries removed. Safe to call for ids
     that never registered anything.
     """
+    return remove_temp_entries(take_temp_entries(download_id), download_id)
+
+
+def take_temp_entries(download_id: str) -> list:
+    """Remove and return a download's registered temp paths."""
+    return _temp_registry.pop(download_id, [])
+
+
+def late_cleanup_entries(entries: list) -> list:
+    """The entries safe to delete again a while after a cancel.
+
+    Only Median's own uuid-named temp paths qualify. A user-facing name like
+    "Artist - Album" may already belong to a fresh download of the same album
+    by the time a delayed pass runs.
+    """
+    return [
+        (kind, raw) for kind, raw in entries
+        if Path(raw).name.startswith(('_tmp_', '_concat_'))
+    ]
+
+
+def remove_temp_entries(entries: list, download_id: str = '') -> int:
     from backend.utils.ffmpeg_handler import cancel_ffmpeg_for
 
-    entries = _temp_registry.pop(download_id, [])
     # An ffmpeg merge still running in its executor thread would otherwise
     # keep writing into these paths after they are deleted (BE-024).
     cancel_ffmpeg_for(raw for kind, raw in entries if kind in ('dir', 'stem'))
@@ -169,7 +190,8 @@ def cleanup_partials(download_id: str) -> int:
             app_logger.warning(f"Partial cleanup error for {raw}: {e}")
     if removed:
         app_logger.info(
-            f"Removed {removed} leftover partial file(s) for {download_id[:8]}"
+            f"Removed {removed} leftover partial file(s)"
+            + (f" for {download_id[:8]}" if download_id else "")
         )
     return removed
 
@@ -315,6 +337,9 @@ async def download_single(
                 )
 
     ydl_opts = get_ydl_opts(download_type, fmt, bitrate, temp_template + '.%(ext)s', make_cancel_hook(download_id, hook))
+    # A single download is one video even when its link carries &list= —
+    # without this yt-dlp fetched the entire playlist or Mix (BE-034).
+    ydl_opts['noplaylist'] = True
 
     # Matched sources (a Spotify track found on YouTube) carry ranked
     # runner-ups; everything else is just the one URL, and behaves as before.
