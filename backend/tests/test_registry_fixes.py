@@ -1152,3 +1152,132 @@ def test_no_direct_youtubedl_construction():
         and re.search(r'YoutubeDL\(', p.read_text())
     ]
     assert offenders == []
+
+
+# ── Bot-check follow-up: stop on YouTube's IP-wide refusal ───────────────────
+
+_BOT = ("ERROR: [youtube] 97u1DIb7yKY: Sign in to confirm you’re not a bot. "
+        "Use --cookies-from-browser or --cookies for the authentication.")
+
+
+def test_be037_bot_check_is_not_retried_as_a_job():
+    from backend.queue_manager import _is_permanent_error
+    assert _is_permanent_error(RuntimeError(_BOT))
+    assert _is_permanent_error(RuntimeError(_BOT.replace('’', "'")))
+
+
+def test_be038_match_track_stops_at_the_first_bot_check(monkeypatch):
+    from backend.utils import yt_match
+    probes = []
+
+    def fake_check(url):
+        probes.append(url)
+        raise yt_match.CandidateProbeError(
+            url, yt_match.Availability.EXTRACTOR_FAILURE, _BOT)
+
+    cands = [{'id': f'v{i}', 'title': 'Love Bug', 'channel': 'Jonas Brothers',
+              'duration': 200} for i in range(3)]
+    monkeypatch.setattr(yt_match, '_search', lambda q, n: cands)
+    monkeypatch.setattr(yt_match, '_check_availability', fake_check)
+    with pytest.raises(yt_match.CandidateProbeError):
+        yt_match.match_track_sync('Love Bug', 'Jonas Brothers', 200)
+    assert len(probes) == 1
+
+
+def test_be038_match_all_stops_probing_other_tracks(monkeypatch):
+    from backend.utils import yt_match
+    calls = []
+
+    async def fake_match(title, artist, duration=0):
+        calls.append(title)
+        raise yt_match.CandidateProbeError(
+            'u', yt_match.Availability.EXTRACTOR_FAILURE, _BOT)
+
+    monkeypatch.setattr(yt_match, 'match_track', fake_match)
+    monkeypatch.setattr(yt_match.settings, 'SPOTIFY_MATCH_CONCURRENCY', 1)
+    tracks = [{'title': f'T{i}'} for i in range(10)]
+    failures = []
+    out = asyncio.run(yt_match.match_all(tracks, failures=failures))
+    assert out == [None] * 10
+    assert calls == ['T0']
+    assert len(failures) == 10  # still reported as probe failures, not "missing"
+
+
+class _BotAfterFirstYDL:
+    calls: list = []
+
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def download(self, urls):
+        _BotAfterFirstYDL.calls.append(urls[0])
+        if urls[0] != 'ok':
+            raise RuntimeError(_BOT)
+        Path(self.opts['outtmpl'].replace('.%(ext)s', '.mp3')).write_bytes(b'a')
+
+
+def test_be039_fetch_does_not_retry_a_bot_check(tmp_path, monkeypatch):
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', _BotAfterFirstYDL)
+    monkeypatch.setattr(downloader.settings, 'TRACK_DOWNLOAD_ATTEMPTS', 2)
+    _BotAfterFirstYDL.calls = []
+    opts = {'outtmpl': str(tmp_path / 't') + '.%(ext)s'}
+    with pytest.raises(RuntimeError, match='not a bot'):
+        asyncio.run(downloader._fetch_with_fallback(['a', 'b'], opts, 'T'))
+    assert _BotAfterFirstYDL.calls == ['a']
+
+
+def test_be039_album_keeps_done_tracks_and_skips_the_rest(tmp_path, monkeypatch):
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', _BotAfterFirstYDL)
+    monkeypatch.setattr(downloader.settings, 'YTDLP_COOKIES_FILE', '')
+    _BotAfterFirstYDL.calls = []
+    warnings = []
+
+    async def cb(pct, message='', warning=None, **kw):
+        if warning:
+            warnings.append(warning)
+
+    tracks = [{'index': i + 1, 'title': f'T{i}', 'duration': 100, 'url': u}
+              for i, u in enumerate(['ok', 'b1', 'b2', 'b3'])]
+    res = asyncio.run(downloader._download_each_track(
+        tracks, tmp_path, 'audio', 'mp3', '320', cb))
+    assert [t['title'] for t, _ in res] == ['T0']
+    assert _BotAfterFirstYDL.calls == ['ok', 'b1']
+    assert any('3 track(s) skipped' in w and 'YTDLP_COOKIES_FILE' in w for w in warnings)
+
+    # Nothing downloaded yet: the real cause is raised, not "no media files".
+    _BotAfterFirstYDL.calls = []
+    with pytest.raises(RuntimeError, match='not a bot'):
+        asyncio.run(downloader._download_each_track(
+            tracks[1:], tmp_path / 'x', 'audio', 'mp3', '320', cb))
+    assert _BotAfterFirstYDL.calls == ['b1']
+
+
+def test_be040_probe_failure_warning_carries_the_advice(monkeypatch):
+    from backend import queue_manager
+    from backend.utils import yt_match
+    monkeypatch.setattr(queue_manager.settings, 'YTDLP_COOKIES_FILE', '')
+
+    async def fake_match_all(tracks, on_progress=None, failures=None):
+        failures.append((tracks[1], yt_match.CandidateProbeError(
+            'u', yt_match.Availability.EXTRACTOR_FAILURE, _BOT)))
+        return [yt_match.Match(url='https://youtu.be/a', confidence=0.9,
+                               title='A', channel='', duration=0), None]
+
+    monkeypatch.setattr(yt_match, 'match_all', fake_match_all)
+    warnings = []
+
+    async def cb(pct, message='', warning=None, **kw):
+        if warning:
+            warnings.append(warning)
+
+    meta = {'is_playlist': True, 'tracks': [{'title': 'A'}, {'title': 'B'}]}
+    asyncio.run(queue_manager._resolve_spotify_matches(meta, 'u', cb))
+    assert any('YTDLP_COOKIES_FILE' in w for w in warnings)

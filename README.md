@@ -149,9 +149,13 @@ from a browser that is logged in to YouTube:
 2. Export the cookies for youtube.com in Netscape `cookies.txt` format, using
    an extension such as "Get cookies.txt LOCALLY". Then close that window
    without logging out, so the session stays valid.
-3. Save the file as `cookies/cookies.txt` next to `docker-compose.yml`.
+3. Save the file as `cookies/cookies.txt` next to `docker-compose.yml`, and
+   make sure the container can read it: `chmod 644 cookies/cookies.txt`.
+   Median runs as an unprivileged user, so a `600` file is skipped.
 4. In `.env`, set `YTDLP_COOKIES_FILE=/app/cookies/cookies.txt`, then run
-   `docker compose up -d`.
+   `docker compose up -d --build`. The rebuild is needed the first time after
+   updating Median; afterwards, swapping in a fresh `cookies.txt` only needs
+   `docker compose restart median`.
 
 `/api/health` shows `"youtube_cookies": true` once they are loaded. Median
 only reads the file and never writes to it. Cookies expire eventually; when

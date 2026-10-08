@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Dict, Optional, Any
 from backend.db_models import get_db, row_to_dict
-from backend.utils.ydl_opts_builder import explain_ydl_error
+from backend.utils.ydl_opts_builder import explain_ydl_error, is_bot_check
 from backend.downloader import (
     download_single, download_playlist,
     cleanup_partials, discard_temp_entries,
@@ -38,6 +38,8 @@ PERMANENT_ERROR_MARKERS = (
     'unsupported url',
     'requested format is not available',
     'no video formats found',
+    # YouTube's IP-wide bot check: a second run fails the same way (BE-037).
+    'not a bot',
 )
 
 
@@ -350,10 +352,13 @@ async def _resolve_spotify_matches(metadata: dict, url: str, progress_callback):
 
     if probe_failures:
         titles = ', '.join((t.get('title') or '?') for t, _ in probe_failures[:3])
+        bot = next((e for _, e in probe_failures if is_bot_check(e.cause)), None)
         await warn(
             f"{len(probe_failures)} track(s) could not be verified because "
             f"the YouTube extractor/network failed (not missing): {titles}"
             + ("..." if len(probe_failures) > 3 else "")
+            # yt-dlp's own text suggests --cookies flags; say what works here (BE-040).
+            + (f". {explain_ydl_error(bot.cause)}" if bot else "")
         )
     if missing:
         await warn(
