@@ -53,3 +53,7 @@ database/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# YouTube cookies are account credentials — never commit them
+cookies/*
+!cookies/README.txt

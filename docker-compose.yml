@@ -17,6 +17,8 @@ services:
       - median_backups:/app/backups
       - median_database:/app/database
       - median_logs:/app/logs
+      # cookies.txt for YouTube's sign-in check (YTDLP_COOKIES_FILE in .env)
+      - ./cookies:/app/cookies:ro,z
     expose:
       - "5000"
     networks:

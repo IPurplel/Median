@@ -19,7 +19,7 @@ from backend.concatenation_engine import (
 )
 from backend.image_processor import download_cover_image, save_cover_as
 from backend.logger import app_logger
-from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP
+from backend.utils.ydl_opts_builder import get_ydl_opts, FORMAT_EXT_MAP, new_ydl
 from backend.utils.tag_writer import write_tags
 from backend.utils.eta import JobEta, TrackWeights, normalize_ytdlp_eta
 
@@ -590,7 +590,7 @@ async def _fetch_with_fallback(
         for attempt in range(1, attempts + 1):
             _check_cancelled(download_id)
             def _dl(u=url, o=opts):
-                with yt_dlp.YoutubeDL(o) as ydl:
+                with new_ydl(o) as ydl:
                     ydl.download([u])
             try:
                 await loop.run_in_executor(None, _dl)
@@ -1134,7 +1134,7 @@ async def download_playlist(
             ydl_opts['progress_hooks'] = [hook, make_cancel_hook(download_id)]
 
             def _download():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with new_ydl(ydl_opts) as ydl:
                     ydl.download([url])
 
             _check_cancelled(download_id)

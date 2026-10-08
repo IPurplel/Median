@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     BATCH_DELETE_MINUTES: int = 3
     CORS_ORIGINS: str = "*"
 
+    # cookies.txt (Netscape format) exported from a browser logged in to
+    # YouTube. YouTube asks servers it distrusts — VPS and datacenter IPs
+    # especially — to "sign in to confirm you're not a bot"; cookies are the
+    # only reliable way past that. Read-only: yt-dlp never writes it back.
+    YTDLP_COOKIES_FILE: str = ""
+
     # Does double duty: how often the cleanup job runs AND how old a completed
     # download must be to be swept. Real retention therefore lands between one
     # and two times this value. Long enough that a multi-album batch finishes

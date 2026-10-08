@@ -1,6 +1,50 @@
+import os
 from typing import Optional, Callable
 from backend.config import settings
 from backend.utils.validators import ORIGINAL_BITRATE
+
+
+def cookies_file() -> str:
+    """The configured cookies.txt, or '' when unset or unreadable."""
+    path = (settings.YTDLP_COOKIES_FILE or '').strip()
+    return path if path and os.access(path, os.R_OK) else ''
+
+
+def new_ydl(opts: dict):
+    """A YoutubeDL with Median's cookies applied. Every yt-dlp use goes here.
+
+    yt-dlp rewrites its cookie file whenever an instance closes. Several run
+    at once (downloads, searches, metadata), so they would race over the
+    file, and a read-only mount would fail outright — the file is only read.
+    """
+    import yt_dlp
+    cookies = cookies_file()
+    if cookies and 'cookiefile' not in opts:
+        opts = {**opts, 'cookiefile': cookies}
+    ydl = yt_dlp.YoutubeDL(opts)
+    if cookies:
+        ydl.save_cookies = lambda: None
+    return ydl
+
+
+_BOT_CHECK_MARKERS = ('confirm you’re not a bot', "confirm you're not a bot")
+
+
+def explain_ydl_error(message: str) -> str:
+    """Swap YouTube's bot-check error for advice that applies to Median.
+
+    yt-dlp's text tells the user to pass --cookies, which they can't do here.
+    """
+    if not any(m in (message or '') for m in _BOT_CHECK_MARKERS):
+        return message
+    if cookies_file():
+        return ("YouTube asked this server to sign in to prove it isn't a bot, "
+                "even with the cookies in YTDLP_COOKIES_FILE. They have probably "
+                "expired — export a fresh cookies.txt and restart Median.")
+    return ("YouTube asked this server to sign in to prove it isn't a bot. This "
+            "happens on IP addresses YouTube distrusts (VPS, datacenter, VPN). "
+            "Set YTDLP_COOKIES_FILE to a cookies.txt exported from a browser "
+            "logged in to YouTube — see \"YouTube asks to sign in\" in the README.")
 
 
 FORMAT_EXT_MAP = {

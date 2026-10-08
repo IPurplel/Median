@@ -138,6 +138,28 @@ Any site supported by [yt-dlp](https://github.com/yt-dlp/yt-dlp) may work, but o
 
 ---
 
+## 🔑 YouTube asks to sign in
+
+If downloads fail with **"Sign in to confirm you're not a bot"**, YouTube has
+flagged the server's IP address. This is common on VPS, datacenter and VPN
+addresses, and it isn't a bug in Median. The fix is to give Median cookies
+from a browser that is logged in to YouTube:
+
+1. In a private/incognito window, log in to YouTube.
+2. Export the cookies for youtube.com in Netscape `cookies.txt` format, using
+   an extension such as "Get cookies.txt LOCALLY". Then close that window
+   without logging out, so the session stays valid.
+3. Save the file as `cookies/cookies.txt` next to `docker-compose.yml`.
+4. In `.env`, set `YTDLP_COOKIES_FILE=/app/cookies/cookies.txt`, then run
+   `docker compose up -d`.
+
+`/api/health` shows `"youtube_cookies": true` once they are loaded. Median
+only reads the file and never writes to it. Cookies expire eventually; when
+the error comes back, export a fresh file. The cookies give access to that
+YouTube account, so a spare account is a good idea. `cookies/` is gitignored.
+
+---
+
 ## 🟢 Spotify
 
 **Spotify's audio cannot be downloaded.** It is Widevine-DRM encrypted, and no tool — Median included — can extract it.

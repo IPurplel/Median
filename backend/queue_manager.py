@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from typing import Dict, Optional, Any
 from backend.db_models import get_db, row_to_dict
+from backend.utils.ydl_opts_builder import explain_ydl_error
 from backend.downloader import (
     download_single, download_playlist,
     cleanup_partials, discard_temp_entries,
@@ -580,7 +581,7 @@ async def _run_download(download_id: str, download_params: dict):
         remove_temp_entries(entries, download_id)
         _schedule_late_cleanup(download_id, late_cleanup_entries(entries))
     except Exception as e:
-        error_msg = str(e)
+        error_msg = explain_ydl_error(str(e))
         cleanup_partials(download_id)
         update_download_status(download_id, 'error', error_message=error_msg)
         download_states[download_id]['status'] = 'error'
