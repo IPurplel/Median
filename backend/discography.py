@@ -18,6 +18,7 @@ from backend.config import settings
 from backend.logger import app_logger
 from backend.utils.cache_manager import metadata_cache
 from backend.utils.validators import detect_platform
+from backend.utils.ydl_opts_builder import new_ydl
 
 # Cache key prefix — the discography listing is stored in the same table as
 # track metadata, so it needs a namespace that can never collide with a URL.
@@ -158,7 +159,7 @@ async def _flat_entries(page_url: str) -> list:
 
     def _extract():
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with new_ydl(opts) as ydl:
                 return ydl.extract_info(page_url, download=False)
         except Exception as exc:
             app_logger.debug(f"Discography page {page_url!r} failed: {exc}")

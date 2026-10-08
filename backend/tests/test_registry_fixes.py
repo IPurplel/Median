@@ -1098,3 +1098,57 @@ def test_be036_sidecar_and_download_are_converted(tmp_path):
     inplace.write_bytes(src.read_bytes())
     save_cover_as(str(inplace), str(inplace))
     assert Image.open(inplace).format == 'JPEG'
+
+
+# ── YouTube sign-in check: cookies ───────────────────────────────────────────
+
+_NETSCAPE = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tPREF\tf6=40000000\n"
+
+
+def test_new_ydl_reads_cookies_but_never_writes_them(tmp_path, monkeypatch):
+    from backend.config import settings
+    from backend.utils.ydl_opts_builder import new_ydl
+    jar = tmp_path / 'cookies.txt'
+    jar.write_text(_NETSCAPE)
+    jar.chmod(0o444)  # as mounted :ro
+    monkeypatch.setattr(settings, 'YTDLP_COOKIES_FILE', str(jar))
+    with new_ydl({'quiet': True}) as ydl:
+        assert ydl.params['cookiefile'] == str(jar)
+        assert any(c.name == 'PREF' for c in ydl.cookiejar)
+    assert jar.read_text() == _NETSCAPE  # close() did not rewrite it
+
+
+def test_new_ydl_without_cookies(tmp_path, monkeypatch):
+    from backend.config import settings
+    from backend.utils.ydl_opts_builder import new_ydl
+    for value in ('', str(tmp_path / 'missing.txt')):
+        monkeypatch.setattr(settings, 'YTDLP_COOKIES_FILE', value)
+        with new_ydl({'quiet': True}) as ydl:
+            assert 'cookiefile' not in ydl.params
+
+
+def test_bot_check_error_gets_median_advice(tmp_path, monkeypatch):
+    from backend.config import settings
+    from backend.utils.ydl_opts_builder import explain_ydl_error
+    raw = ("ERROR: [youtube] 97u1DIb7yKY: Sign in to confirm you’re not a bot. "
+           "Use --cookies-from-browser or --cookies for the authentication.")
+    monkeypatch.setattr(settings, 'YTDLP_COOKIES_FILE', '')
+    msg = explain_ydl_error(raw)
+    assert 'YTDLP_COOKIES_FILE' in msg and '--cookies' not in msg
+    jar = tmp_path / 'c.txt'
+    jar.write_text(_NETSCAPE)
+    monkeypatch.setattr(settings, 'YTDLP_COOKIES_FILE', str(jar))
+    assert 'expired' in explain_ydl_error(raw)
+    assert explain_ydl_error('ERROR: Video unavailable') == 'ERROR: Video unavailable'
+
+
+def test_no_direct_youtubedl_construction():
+    """Every yt-dlp instance must go through new_ydl, or it skips the cookies."""
+    import re
+    root = Path(__file__).resolve().parents[1]
+    offenders = [
+        str(p.relative_to(root)) for p in root.rglob('*.py')
+        if 'tests' not in p.parts and p.name != 'ydl_opts_builder.py'
+        and re.search(r'YoutubeDL\(', p.read_text())
+    ]
+    assert offenders == []

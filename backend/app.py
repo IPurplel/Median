@@ -30,6 +30,7 @@ from backend.scheduler import start_scheduler
 from backend.utils.validators import validate_url, is_valid_uuid, validate_bitrate
 from backend.utils.file_organizer import format_file_size, format_duration
 from backend.utils.ffmpeg_handler import is_ffmpeg_available
+from backend.utils.ydl_opts_builder import cookies_file
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -147,6 +148,13 @@ async def lifespan(app: FastAPI):
     validate_settings()
 
     app_logger.info("Initializing Median...")
+    if settings.YTDLP_COOKIES_FILE.strip():
+        if cookies_file():
+            app_logger.info("YouTube cookies loaded from YTDLP_COOKIES_FILE")
+        else:
+            app_logger.warning(
+                f"YTDLP_COOKIES_FILE={settings.YTDLP_COOKIES_FILE!r} is not a "
+                "readable file — continuing without cookies")
     from backend.config import ensure_directories
     ensure_directories()
     init_db()
@@ -482,6 +490,7 @@ async def health():
         "js_runtime": js_runtime,
         "js_runtime_available": js_runtime_available,
         "youtube_challenges_ok": ejs_available and js_runtime_available,
+        "youtube_cookies": bool(cookies_file()),
         "active_downloads": len(active_downloads),
         "timestamp": datetime.now().isoformat(),
     }

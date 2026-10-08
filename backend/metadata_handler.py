@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 from backend.utils.cache_manager import metadata_cache
 from backend.utils.validators import detect_platform, is_playlist_url
 from backend.logger import app_logger
+from backend.utils.ydl_opts_builder import new_ydl, explain_ydl_error
 
 _inflight: dict[str, asyncio.Lock] = {}
 
@@ -68,7 +69,7 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 'socket_timeout': 30,
             }
             def _flat():
-                with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                with new_ydl(flat_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
             info_flat = await loop.run_in_executor(None, _flat)
@@ -106,7 +107,7 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 }
                 def _enrich():
                     try:
-                        with yt_dlp.YoutubeDL(enrich_opts) as ydl:
+                        with new_ydl(enrich_opts) as ydl:
                             return ydl.extract_info(url, download=False)
                     except Exception as exc:
                         app_logger.debug(f"Duration enrichment failed: {exc}")
@@ -147,7 +148,7 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                     }
                     def _full_first(u=first_url):
                         try:
-                            with yt_dlp.YoutubeDL(full_opts) as ydl:
+                            with new_ydl(full_opts) as ydl:
                                 return ydl.extract_info(u, download=False)
                         except Exception as exc:
                             app_logger.debug(f"First-entry full extract failed for {u!r}: {exc}")
@@ -169,7 +170,7 @@ async def _do_extract(url: str) -> Dict[str, Any]:
                 'noplaylist': True,
             }
             def _single():
-                with yt_dlp.YoutubeDL(full_opts) as ydl:
+                with new_ydl(full_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
             info = await loop.run_in_executor(None, _single)
@@ -182,7 +183,7 @@ async def _do_extract(url: str) -> Dict[str, Any]:
 
     except Exception as e:
         app_logger.error(f"Metadata extraction error for {url}: {e}")
-        return {"error": str(e)}
+        return {"error": explain_ydl_error(str(e))}
 
 
 # Trailing "(Official Music Video)", "[Lyric Video]", "(Audio)", "(HD)" etc.

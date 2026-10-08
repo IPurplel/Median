@@ -21,6 +21,7 @@ from typing import Optional
 
 from backend.config import settings
 from backend.logger import app_logger
+from backend.utils.ydl_opts_builder import new_ydl
 
 # Below this, the caller warns the user that the match may be the wrong version.
 CONFIDENT = 0.55
@@ -155,7 +156,7 @@ def _search(query: str, limit: int) -> list:
         'socket_timeout': 30,
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with new_ydl(opts) as ydl:
             info = ydl.extract_info(f'ytsearch{limit}:{query}', download=False)
     except Exception as e:
         # A failed search proves nothing about whether the song exists, so it
@@ -260,7 +261,7 @@ def _check_availability(url: str) -> Availability:
         'socket_timeout': 20, 'noplaylist': True,
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with new_ydl(opts) as ydl:
             info = ydl.extract_info(url, download=False)
         return Availability.AVAILABLE if info else Availability.CONTENT_UNAVAILABLE
     except Exception as e:
