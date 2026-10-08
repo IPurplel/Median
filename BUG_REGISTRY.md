@@ -6,7 +6,7 @@
 **Audit date:** `2026-10-07`  
 **Verification date:** `2026-10-07`  
 **Total bugs:** 22  
-**Status:** 22 original IDs fixed (10 `Verified`, 12 `Fixed`) plus 9 new IDs found in end-to-end testing; see [Fix Log](#fix-log--2026-10-08) and [End-to-End Pass](#end-to-end-pass--2026-10-08). A second bug hunt added 15 IDs (14 fixed, 1 open); see [Second Bug Hunt](#second-bug-hunt--2026-10-08)
+**Status:** 22 original IDs fixed (10 `Verified`, 12 `Fixed`) plus 9 new IDs found in end-to-end testing; see [Fix Log](#fix-log--2026-10-08) and [End-to-End Pass](#end-to-end-pass--2026-10-08). A second bug hunt added 15 IDs; see [Second Bug Hunt](#second-bug-hunt--2026-10-08). A third round fixed BE-031 and added 10 IDs, all fixed; see [Third Round](#third-round--2026-10-08)
 
 ---
 
@@ -755,9 +755,43 @@ fail on the pre-fix code (the BE-029 test only fails on a non-UTC machine).
 | `BE-028` | Low | Storage | Two downloads of the same artist/title got the same output name (chosen before the download, written at the end); the second overwrote the first and both records shared one file | `reserve_unique_file()` claims the name with `O_CREAT|O_EXCL` right before writing | `test_concurrent_file_reservations_are_all_unique` | `Fixed` |
 | `BE-029` | Low | Statistics | 7-day activity labels used local time against UTC rows; with `TZ` set, late-evening downloads landed on the wrong day | Labels built in UTC | `test_activity_labels_are_utc_dates` | `Fixed` |
 | `BE-030` | Low | Chapters / Covers | Found while verifying BE-026: the chapter pass kept only one video stream, dropping the cover attachment (a second mjpeg stream) from merged cover+audio MKV | `-map 0` in the chapter pass | `test_chapter_pass_keeps_the_files_metadata` | `Verified` — merged cover+audio MKV keeps `cover.jpg` |
-| `BE-031` | Low | Cancel / Storage | After a cancel, yt-dlp's worker thread can still write a thumbnail or first `.part` chunk just after the per-download cleanup ran, leaving `_tmp_*` / `_concat_*` leftovers until the stale-partial sweep (up to ~1.5 h). Seen twice in this pass | — | — | `Confirmed` |
+| `BE-031` | Low | Cancel / Storage | After a cancel, yt-dlp's worker thread can still write a thumbnail or first `.part` chunk just after the per-download cleanup ran, leaving `_tmp_*` / `_concat_*` leftovers until the stale-partial sweep (up to ~1.5 h). Seen twice in this pass | Fixed in the third round (`173bf2d`) | see Third Round | `Verified` |
 
 Ruled out: MKV cover attachments surviving the chapter pass looked fine when
 tested on piped input, but piping turns the attachment into a lone video
 stream — on a real file it was dropped (filed as BE-030).
+
+---
+
+## Third Round — 2026-10-08
+
+Branch `chore/ci-and-hunt-3`. CI added (GitHub Actions: backend tests on
+Python 3.11 with ffmpeg, frontend syntax check); its first run passed. The
+third hunt read `spotify.py`, `discography.py`, `yt_match.py`, `validators.py`,
+`eta.py`, `lyrics_fetcher.py` and all of `frontend/app.js` / `theme.js`.
+Fix commits: `173bf2d` (leftovers), `ba1f0be` (hunt). Full suite: 345 passed;
+every new bug test fails on the pre-fix code.
+
+| Bug ID | Severity | Area | Title | Fix | Regression test | Status |
+|---|---|---|---|---|---|---|
+| `BE-031` | Low | Cancel / Storage | (from the second hunt) late yt-dlp writes after a cancel left temp files | Cancel path sweeps the job's `_tmp_*`/`_concat_*` paths again at 10 s and 60 s (never user-named paths, which a re-queued download may already own); the stale sweep also removes album folders with no media left | `test_late_cleanup_only_touches_median_temp_names`, `test_cancel_sweeps_again_for_late_writes`, `test_stale_sweep_removes_media_free_album_folders` | `Verified` — real cancel: two late `_tmp_` files gone within 67 s |
+| `API-003` | Low | API | Unknown `/api/*` paths answered 200 with `index.html` (SPA catch-all) | Catch-all returns 404 JSON under `api/` | `test_unknown_api_path_is_404_but_the_app_still_loads` | `Verified` — `/api/nope` → 404, `/` → 200 |
+| `BE-032` | Low | Cover preview | `/api/cover/preview` imported `imghdr`, removed in Python 3.13 | MIME sniffed with Pillow | `test_image_mime_is_sniffed_with_pillow` | `Verified` — preview returns `data:image/jpeg` |
+| `BE-033` | Low | Database | `idx_downloads_batch` only created when migrating an old DB, never on fresh installs | Index created unconditionally | `test_batch_index_is_created_on_a_fresh_database` | `Fixed` |
+| `SEC-005` | High | URL validation | Platform patterns match a prefix only: `https://x.bandcamp.com@127.0.0.1/…` and `http://a.bandcamp.com.evil.example/…` validated as Bandcamp, bypassing SEC-004 | The parsed hostname must belong to the platform; userinfo rejected | `test_validator_checks_the_real_host`, `test_validator_still_accepts_real_links` | `Verified` — real server: both → 400 |
+| `BE-034` | High | YouTube | A watch link carrying `&list=` (any video opened from a playlist or Mix) was classed as one video but yt-dlp expanded it: validate showed the playlist's title with no duration, and the download fetched every video (confirmed: 96 entries) | `noplaylist` for single-video extraction and download | `test_single_video_extraction_and_download_ignore_the_list` | `Verified` — validate shows "Me at the zoo", 19 s; download is one 19 s file |
+| `BE-035` | Low | Discography | A SoundCloud share link (`on.soundcloud.com/CODE`) used the code as the username → wrong artist pages | Uploader URL from metadata used; bare share link without it returns no pages | `test_soundcloud_share_link_uses_the_uploader_url` | `Fixed` (no real share link to hand) |
+| `FE-004` | Medium | Frontend | Running downloads restored after a refresh were tracked but invisible — the section stayed hidden | `pollDownload` un-hides the section | — (browser) | `Verified` — headless Chromium: card visible after reload |
+| `FE-005` | Low | Frontend | Validation errors (e.g. URL over 2048 chars) showed "[object Object]" | List-shaped `detail` rendered as its messages | — (browser) | `Verified` — shows "URL exceeds maximum length of 2048" |
+| `FE-006` | Medium | Frontend | Bitrate "Original" then the FLAC pill hid the bitrate box but still sent `original`, so the file came out as the source's .opus | Picking FLAC resets an "Original" bitrate | — (browser) | `Verified` — request now carries `bitrate: 320` |
+| `FE-007` | Low | Frontend | With site data blocked, `localStorage` throws; an unguarded read at load stopped `app.js`, leaving Download and Help dead | Guarded storage helpers in `app.js` and `theme.js` | — (browser) | `Verified` — storage blocked: no page errors, Download and Help work |
+
+Also: request validators moved from pydantic v1 `@validator` to v2
+`field_validator` (behaviour unchanged, `test_v2_validators_behave_like_before`).
+
+Ruled out: substring matching in `yt_match` variant words ("live" inside
+"alive") only matters when the wanted title lacks the word, which did not
+produce a wrong pick in practice; empty Spotify/MusicBrainz discographies are
+cached only for a genuine "no albums" answer (a MusicBrainz failure is not
+cached).
 
