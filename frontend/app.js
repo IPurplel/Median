@@ -13,8 +13,11 @@ let customCoverId = null;
 const submittedCoverIds = new Set();  // covers a queued download depends on
 let discography = null;   // { artist, albums: [...] } once resolved for this URL
 let discoLoading = false;
-let activePollers = {};  // download_id -> setInterval id (polling fallback)
-let activeSSE = {};     // download_id -> EventSource
+// download_id -> title for every single download still being tracked. They
+// share one polling request: an EventSource each held a connection open, and
+// over HTTP/1.1 the browser's 6-per-host limit then froze the page (FE-003).
+const trackedDownloads = {};
+let downloadPollTimer = null;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -833,35 +836,43 @@ function notifyFinished(s, fallbackTitle) {
 let _pageHidden = document.hidden;
 document.addEventListener('visibilitychange', () => {
   _pageHidden = document.hidden;
-  // On tab visible: catch-up for polling fallbacks only (SSE auto-resumes)
-  if (!_pageHidden) {
-    Object.keys(activePollers).forEach(async (id) => {
-      try {
-        const s = await api('GET', `/api/download/${id}/status`);
-        updateDlItem(id, s);
-        if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
-          clearInterval(activePollers[id]);
-          delete activePollers[id];
-          notifyFinished(s, id);
-        }
-      } catch (_) {}
-    });
-  }
+  // Catch up straight away instead of waiting for the next tick.
+  if (!_pageHidden) pollTrackedDownloads();
 });
 
-function _startPolling(id, title) {
-  activePollers[id] = setInterval(async () => {
-    if (_pageHidden) return;
+const TERMINAL_STATES = ['completed', 'error', 'cancelled', 'cleaned'];
+// /api/downloads/status refuses more ids than MAX_DISCOGRAPHY_ALBUMS (100).
+const STATUS_BATCH = 100;
+
+async function pollTrackedDownloads() {
+  if (_pageHidden) return;
+  const ids = Object.keys(trackedDownloads);
+  if (!ids.length) {
+    clearInterval(downloadPollTimer);
+    downloadPollTimer = null;
+    return;
+  }
+  for (let i = 0; i < ids.length; i += STATUS_BATCH) {
+    const chunk = ids.slice(i, i + STATUS_BATCH);
+    let states;
     try {
-      const s = await api('GET', `/api/download/${id}/status`);
+      states = await api('GET', `/api/downloads/status?ids=${chunk.join(',')}`);
+    } catch (_) {
+      continue;  // transient — try again next tick
+    }
+    chunk.forEach((id) => {
+      if (!(id in trackedDownloads)) return;  // dismissed while in flight
+      const s = states[id];
+      // An id the server no longer knows about is never coming back.
+      if (!s) { delete trackedDownloads[id]; return; }
       updateDlItem(id, s);
-      if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
-        clearInterval(activePollers[id]);
-        delete activePollers[id];
+      if (TERMINAL_STATES.includes(s.status)) {
+        const title = trackedDownloads[id];
+        delete trackedDownloads[id];
         notifyFinished(s, title);
       }
-    } catch (_) {}
-  }, 1200);
+    });
+  }
 }
 
 function pollDownload(id, title, artist) {
@@ -871,33 +882,9 @@ function pollDownload(id, title, artist) {
   item.innerHTML = buildDlItem(id, title, artist, 'queued', 0, '', '', '', 0, false);
   activeList.prepend(item);
 
-  const src = new EventSource(`/api/download/${id}/events`);
-  activeSSE[id] = src;
-
-  src.onmessage = (e) => {
-    try {
-      const s = JSON.parse(e.data);
-      if (s.status === 'not_found') {
-        src.close();
-        delete activeSSE[id];
-        return;
-      }
-      updateDlItem(id, s);
-      if (['completed', 'error', 'cancelled', 'cleaned'].includes(s.status)) {
-        src.close();
-        delete activeSSE[id];
-        notifyFinished(s, title);
-      }
-    } catch (_) {}
-  };
-
-  src.onerror = () => {
-    if (activeSSE[id]) {
-      activeSSE[id].close();
-      delete activeSSE[id];
-    }
-    _startPolling(id, title);
-  };
+  trackedDownloads[id] = title;
+  if (!downloadPollTimer) downloadPollTimer = setInterval(pollTrackedDownloads, 1000);
+  pollTrackedDownloads();
 }
 
 // A discography batch queues one download per album. One EventSource each
@@ -1170,8 +1157,7 @@ function updateDlItem(id, s) {
 async function dismissDl(id, status) {
   if (status === 'downloading' || status === 'queued') {
     try { await api('DELETE', `/api/download/${id}`); } catch (_) {}
-    if (activeSSE[id]) { activeSSE[id].close(); delete activeSSE[id]; }
-    if (activePollers[id]) { clearInterval(activePollers[id]); delete activePollers[id]; }
+    delete trackedDownloads[id];
     toast('Download cancelled', 'info');
   }
   const el = $(`#dl-${id}`);
@@ -1691,7 +1677,7 @@ function debounce(fn, ms) {
 
   // Persist only active (non-finished) download IDs before unload
   window.addEventListener('beforeunload', () => {
-    const active = Object.keys(activePollers).map(id => {
+    const active = Object.keys(trackedDownloads).map(id => {
       const el = $(`#dl-${id}`);
       return {
         id,

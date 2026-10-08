@@ -588,3 +588,273 @@ def test_share_link_variants_are_recognised(url, platform, playlist):
     from backend.utils.validators import detect_platform, is_playlist_url
     assert detect_platform(url) == platform
     assert is_playlist_url(url) == playlist
+
+
+# ── Second bug hunt (2026-10-08) ─────────────────────────────────────────────
+
+# BE-019: a download cancelled while still queued settles as cancelled
+
+def test_cancel_while_queued_settles_the_download(tmp_path, monkeypatch):
+    from contextlib import suppress
+    from backend import db_models, queue_manager
+
+    monkeypatch.setattr(db_models.settings, 'DATABASE_PATH', str(tmp_path / 'm.db'))
+    db_models.init_db()
+
+    async def scenario():
+        # Every slot taken: the new download can only wait.
+        queue_manager._dl_semaphore = asyncio.Semaphore(0)
+        did = await queue_manager.enqueue_download({
+            'url': 'https://youtu.be/dQw4w9WgXcQ', 'download_type': 'audio',
+            'format': 'mp3', 'metadata': {'title': 'T', 'platform': 'youtube'},
+        })
+        task = queue_manager.active_downloads[did]
+        await asyncio.sleep(0)                 # now parked on the semaphore
+        assert queue_manager.cancel_download(did)
+        with suppress(asyncio.CancelledError):
+            await task
+        return did
+
+    try:
+        did = asyncio.run(scenario())
+    finally:
+        queue_manager._dl_semaphore = None
+    assert queue_manager.get_download_status(did)['status'] == 'cancelled'
+    assert did not in queue_manager.active_downloads
+    assert did not in downloader._cancel_flags
+    assert queue_manager.get_queue() == []
+
+
+# BE-020 / BE-021 / BE-025: separate-track albums survive a bad entry
+
+class _OneBadEntryYDL:
+    opts_seen = None
+    succeed = True
+
+    def __init__(self, opts):
+        self.opts = opts
+        _OneBadEntryYDL.opts_seen = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def download(self, urls):
+        folder = Path(self.opts['outtmpl']).parent
+        if _OneBadEntryYDL.succeed:
+            (folder / '001 - Good.mp3').write_bytes(b'a')
+        # With ignoreerrors yt-dlp reports the bad entry and carries on.
+        self.opts['logger'].error('ERROR: [youtube] abc: Private video')
+
+
+def _separate_album(tmp_path, monkeypatch, download_id):
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', _OneBadEntryYDL)
+    monkeypatch.setattr(downloader.settings, 'UPLOAD_FOLDER', str(tmp_path))
+    warnings = []
+
+    async def progress(pct, msg='', warning=None, **kw):
+        if warning:
+            warnings.append(warning)
+
+    meta = {'artist': 'A', 'album': 'B', 'platform': 'youtube', 'track_count': 2,
+            'tracks': [{'title': 'Good'}, {'title': 'Bad'}]}
+    run = downloader.download_playlist(
+        'https://www.youtube.com/playlist?list=PLx', 'audio', 'mp3', '192', meta,
+        progress_callback=progress, download_id=download_id)
+    return run, warnings
+
+
+def test_one_bad_playlist_entry_no_longer_fails_the_album(tmp_path, monkeypatch):
+    _OneBadEntryYDL.succeed = True
+    run, warnings = _separate_album(tmp_path, monkeypatch, 'be020')
+    try:
+        result = asyncio.run(run)
+    finally:
+        downloader.discard_temp_entries('be020')
+    opts = _OneBadEntryYDL.opts_seen
+    assert opts['ignoreerrors'] == 'only_download'
+    assert opts['playlistend'] == downloader.settings.MAX_PLAYLIST_TRACKS
+    assert result['track_count'] == 1
+    assert any('skipped' in w and 'Private video' in w for w in warnings)
+
+
+def test_failed_album_folder_is_removed_by_partial_cleanup(tmp_path, monkeypatch):
+    _OneBadEntryYDL.succeed = False
+    run, _ = _separate_album(tmp_path, monkeypatch, 'be021')
+    with pytest.raises(RuntimeError, match='Private video'):
+        asyncio.run(run)
+    assert any(p.is_dir() for p in tmp_path.iterdir())
+    downloader.cleanup_partials('be021')
+    assert not any(p.is_dir() for p in tmp_path.iterdir())
+
+
+# BE-022: video merges finish in time
+
+def test_identical_inputs_are_joined_without_reencoding(tmp_path, monkeypatch):
+    calls, files = _stub_video_merge(monkeypatch, tmp_path)
+    sig = (('video', 'h264', 1920, 1080, '30/1', None, None),
+           ('audio', 'aac', None, None, '0/0', '44100', 2))
+    monkeypatch.setattr(ce, 'get_stream_signature', lambda f: sig)
+    seen = []
+
+    def fake_ffmpeg(args, timeout=None):
+        seen.append(args)
+        Path(args[-1]).write_bytes(b'video')
+        return 0, '', ''
+    monkeypatch.setattr(ce, 'run_ffmpeg', fake_ffmpeg)
+
+    assert asyncio.run(ce.concatenate_video(files, str(tmp_path / 'o.mp4'), 'mp4'))
+    assert len(seen) == 1 and '-c' in seen[0]
+    assert seen[0][seen[0].index('-c') + 1] == 'copy'
+
+
+def test_stream_copy_rules():
+    h264 = (('video', 'h264', 1280, 720, '30/1', None, None),
+            ('audio', 'aac', None, None, '0/0', '44100', 2))
+    vp9 = (('video', 'vp9', 1280, 720, '30/1', None, None),
+           ('audio', 'opus', None, None, '0/0', '48000', 2))
+    assert ce._can_stream_copy([h264, h264], 'mp4')
+    assert not ce._can_stream_copy([h264, vp9], 'mkv')      # inputs differ
+    assert not ce._can_stream_copy([h264, h264], 'webm')    # webm can't hold h264
+    assert ce._can_stream_copy([vp9, vp9], 'webm')
+    assert not ce._can_stream_copy([h264, None], 'mp4')     # unreadable input
+
+
+def test_webm_reencode_uses_fast_vp9_settings_and_timeouts_scale():
+    args = ce._merge_video_codecs('webm', reencoded=False)
+    assert args[args.index('-deadline') + 1] == 'realtime'
+    assert '-row-mt' in args
+    assert ce._scaled_timeout(600, 3600, 4) == 14400
+    assert ce._scaled_timeout(600, 10, 4) == 600
+
+
+# BE-023: merge progress stays within what is left of the bar
+
+def test_merge_progress_is_scaled_and_never_says_complete_early():
+    seen = []
+
+    async def cb(pct, message='', warning=None, **kw):
+        seen.append((pct, message, warning))
+
+    scaled = downloader._scaled_progress(cb, 75, 99)
+
+    async def go():
+        await scaled(10, 'Concatenating audio...')
+        await scaled(100, 'Complete')
+        await scaled(None, '', warning='heads up')
+    asyncio.run(go())
+    assert seen[0][0] == pytest.approx(77.4)
+    assert seen[1][:2] == (99, 'Finishing...')
+    assert seen[2] == (None, '', 'heads up')
+
+
+# BE-024: cancelling a merge stops ffmpeg
+
+def test_cancel_kills_a_running_ffmpeg_and_blocks_new_ones(tmp_path, monkeypatch):
+    import sys
+    import time
+    from backend.utils import ffmpeg_handler as fh
+
+    monkeypatch.setattr(fh, 'get_ffmpeg_path', lambda: sys.executable)
+    out = str(tmp_path / 'Artist - Album.mp3')
+    result = {}
+
+    def run():
+        result['r'] = fh.run_ffmpeg(['-c', 'import time; time.sleep(30)', out])
+    t = threading.Thread(target=run)
+    start = time.monotonic()
+    t.start()
+    for _ in range(100):                       # wait for the process to exist
+        if fh._running:
+            break
+        time.sleep(0.05)
+
+    downloader._register_temp('be024', 'stem', out)
+    downloader.cleanup_partials('be024')
+    t.join(10)
+    assert not t.is_alive() and time.monotonic() - start < 10
+    assert result['r'][0] != 0 and 'cancelled' in result['r'][2]
+    # A follow-up step on the same output (chapters, cover) must not start.
+    assert fh.run_ffmpeg(['-c', 'pass', out])[2] == 'FFmpeg cancelled'
+
+
+# SEC-004: /api/download validates the URL like /api/validate does
+
+def test_download_rejects_unsupported_urls(client, monkeypatch):
+    from backend import app as app_module
+
+    async def boom(url, *a, **k):
+        raise AssertionError('extract_metadata must not run for a rejected URL')
+    monkeypatch.setattr(app_module, 'extract_metadata', boom)
+    r = client.post('/api/download', headers={'Authorization': 'Bearer sekrit'},
+                    json={'url': 'http://127.0.0.1:8080/admin',
+                          'download_type': 'audio', 'format': 'mp3'})
+    assert r.status_code == 400
+
+
+# BE-026: adding chapters keeps the file's own tags
+
+def test_chapter_pass_keeps_the_files_metadata(monkeypatch):
+    from backend import ffmpeg_chapters_handler as ch
+    seen = {}
+
+    def fake_ffmpeg(args, timeout=None):
+        seen['args'] = args
+        return 0, '', ''
+    monkeypatch.setattr(ch, 'run_ffmpeg', fake_ffmpeg)
+    ch.embed_chapters('in.mkv', 'meta.txt', 'out.mkv')
+    args = seen['args']
+    assert args[args.index('-map_metadata') + 1] == '0'
+    assert args[args.index('-map_chapters') + 1] == '1'
+    # BE-030: every stream is kept, including a cover attachment.
+    assert args[args.index('-map') + 1] == '0'
+
+
+# BE-027: full backups skip caches and temp folders
+
+def test_full_backup_skips_cover_cache_and_temp_dirs(tmp_path, monkeypatch):
+    import zipfile
+    from backend import backup_manager, db_models
+
+    monkeypatch.setattr(db_models.settings, 'DATABASE_PATH', str(tmp_path / 'm.db'))
+    monkeypatch.setattr(backup_manager.settings, 'BACKUP_FOLDER', str(tmp_path / 'b'))
+    monkeypatch.setattr(backup_manager.settings, 'UPLOAD_FOLDER', str(tmp_path / 'd'))
+    db_models.init_db()
+    d = tmp_path / 'd'
+    for rel in ('.cover_cache/abc.jpg', '_concat_1/track_000.mp3', 'A - B/01 - Song.mp3'):
+        (d / rel).parent.mkdir(parents=True, exist_ok=True)
+        (d / rel).write_bytes(b'x')
+
+    result = asyncio.run(backup_manager.create_backup())
+    with zipfile.ZipFile(result['path']) as zf:
+        assert zf.namelist() == ['A - B/01 - Song.mp3']
+
+
+# BE-028: output names are claimed atomically
+
+def test_concurrent_file_reservations_are_all_unique(tmp_path):
+    from backend.utils.file_organizer import reserve_unique_file
+
+    results, barrier = [], threading.Barrier(8)
+
+    def grab():
+        barrier.wait()
+        results.append(reserve_unique_file(tmp_path / 'Artist - Song.mp3'))
+
+    threads = [threading.Thread(target=grab) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(results)) == 8 and all(p.exists() for p in results)
+
+
+# BE-029: the activity chart is labelled in UTC, like the rows it counts
+
+def test_activity_labels_are_utc_dates(client):
+    from datetime import datetime, timezone
+    days = client.get('/api/statistics').json()['activity_7d']
+    assert days[-1]['date'] == datetime.now(timezone.utc).strftime('%Y-%m-%d')

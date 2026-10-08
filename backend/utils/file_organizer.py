@@ -50,6 +50,30 @@ def ensure_unique_path(base_path: Path) -> Path:
     )
 
 
+def reserve_unique_file(base_path: Path) -> Path:
+    """Atomically claim a free file name by creating it empty.
+
+    `ensure_unique_path` only checks what exists right now; two downloads of
+    the same song both got "Artist - Title.mp3", and the second one's move
+    overwrote the first while both records pointed at one file (BE-028).
+    O_CREAT|O_EXCL lets exactly one caller win each name. The caller then
+    writes over the placeholder (shutil.move / ffmpeg -y both replace it).
+    """
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    stem, suffix, parent = base_path.stem, base_path.suffix, base_path.parent
+    candidate = base_path
+    for counter in range(1, _MAX_UNIQUE_ATTEMPTS + 2):
+        try:
+            os.close(os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return candidate
+        except FileExistsError:
+            candidate = parent / f"{stem} ({counter}){suffix}"
+    raise RuntimeError(
+        f"Could not find a unique path for {base_path.name!r} "
+        f"after {_MAX_UNIQUE_ATTEMPTS} attempts"
+    )
+
+
 def reserve_playlist_folder(parent: Path, artist: str, album: str) -> Path:
     """Atomically reserve a playlist folder under `parent` for this download.
 

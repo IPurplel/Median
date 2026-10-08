@@ -101,10 +101,17 @@ def embed_chapters(
     # -map_chapters 1 is essential: without it ffmpeg keeps chapters from the
     # first input that has any — e.g. YouTube video chapters embedded in the
     # source tracks — and silently ignores the album chapters we generated.
+    # -map_metadata 0 keeps the file's own tags: the chapter file carries no
+    # global tags, so taking metadata from it wiped artist/album/title from
+    # merged MKV/WebM output, which nothing re-tags afterwards (BE-026).
+    # -map 0 keeps every stream: ffmpeg's default picks one video stream, so a
+    # cover+audio MKV's cover attachment (a second, mjpeg "video" stream next
+    # to the h264 one) was silently dropped by this pass (BE-030).
     code, _, err = run_ffmpeg([
         '-i', input_path,
         '-i', metadata_path,
-        '-map_metadata', '1',
+        '-map', '0',
+        '-map_metadata', '0',
         '-map_chapters', '1',
         '-codec', 'copy',
         '-y',

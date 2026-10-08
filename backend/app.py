@@ -6,7 +6,7 @@ import time
 import uuid
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Literal
 
@@ -560,8 +560,11 @@ async def start_download(req: DownloadRequest, request: Request):
     if not _rate_check(ip, limit=_RL_LIMIT, window=_RL_WINDOW):
         raise HTTPException(429, "Too many requests — please wait before trying again")
 
-    from backend.utils.validators import detect_platform as _detect
-    platform = _detect(req.url) or 'unknown'
+    # Same gate as /api/validate. Without it any URL reached yt-dlp's generic
+    # extractor, so the server could be pointed at internal hosts (SEC-004).
+    is_valid, platform, error = validate_url(req.url, max_length=settings.MAX_URL_LENGTH)
+    if not is_valid:
+        raise HTTPException(400, error)
 
     meta = await extract_metadata(req.url)
     if 'error' in meta:
@@ -1930,11 +1933,12 @@ async def statistics():
             GROUP BY DATE(completed_at)
         """).fetchall()
         day_map = {r['day']: r['count'] for r in rows}
-        activity = [
-            {'date': (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d'),
-             'count': day_map.get((datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d'), 0)}
-            for i in range(6, -1, -1)
-        ]
+        # SQLite's DATE('now') and completed_at are UTC, so the labels must be
+        # too — local time put late-evening downloads on the wrong day, or
+        # dropped them from the chart, whenever TZ was set (BE-029).
+        today = datetime.now(timezone.utc)
+        days = [(today - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
+        activity = [{'date': d, 'count': day_map.get(d, 0)} for d in days]
 
         top_tracks = db.execute(
             """SELECT title, artist, COUNT(*) as downloads

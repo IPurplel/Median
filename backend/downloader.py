@@ -10,7 +10,7 @@ from backend.utils.validators import detect_platform, is_playlist_url
 from backend.utils.file_organizer import (
     get_single_track_filename, get_album_filename,
     reserve_playlist_folder,
-    ensure_unique_path, find_downloaded_file, find_any_media_file
+    reserve_unique_file, find_downloaded_file, find_any_media_file
 )
 from backend.utils.validators import ORIGINAL_BITRATE, sanitize_filename
 from backend.concatenation_engine import (
@@ -134,8 +134,15 @@ def cleanup_partials(download_id: str) -> int:
     Returns the number of filesystem entries removed. Safe to call for ids
     that never registered anything.
     """
+    from backend.utils.ffmpeg_handler import cancel_ffmpeg_for
+
+    entries = _temp_registry.pop(download_id, [])
+    # An ffmpeg merge still running in its executor thread would otherwise
+    # keep writing into these paths after they are deleted (BE-024).
+    cancel_ffmpeg_for(raw for kind, raw in entries if kind in ('dir', 'stem'))
+
     removed = 0
-    for kind, raw in _temp_registry.pop(download_id, []):
+    for kind, raw in entries:
         path = Path(raw)
         try:
             if kind == 'dir':
@@ -221,6 +228,28 @@ async def _warn(progress_callback: Optional[Callable], message: str):
         pass
 
 
+def _scaled_progress(progress_callback: Optional[Callable], lo: float, hi: float):
+    """Fit a sub-step's own 0-100 progress into [lo, hi] of the job's bar.
+
+    The merge engine counts from zero; handed the raw callback, it dragged the
+    bar from 75% back to 10% and announced "Complete" before tagging (BE-023).
+    Warnings (pct=None) pass straight through.
+    """
+    if not progress_callback:
+        return None
+
+    async def scaled(pct, message='', warning=None, **kwargs):
+        if pct is None:
+            return await progress_callback(None, message, warning=warning)
+        pct = max(0.0, min(100.0, float(pct)))
+        if pct >= 100:
+            message = 'Finishing...'
+        return await progress_callback(
+            lo + (hi - lo) * pct / 100, message, warning=warning, **kwargs
+        )
+    return scaled
+
+
 def _embed_mp4_cover(output_path: Path, cover_file: Optional[str], album_meta: dict):
     """MP4 carries cover-as-video-stream, but AIMP/MusicBee/iTunes look at the
     covr atom for album art — embed it explicitly while the cover still exists."""
@@ -251,8 +280,6 @@ async def download_single(
     else:
         ext = FORMAT_EXT_MAP.get(fmt, fmt)
 
-    filename = get_single_track_filename(artist, title, ext)
-    output_path = ensure_unique_path(download_dir / filename)
     temp_template = str(download_dir / f"_tmp_{uuid.uuid4().hex}")
     _register_temp(download_id, 'stem', temp_template)
 
@@ -353,9 +380,10 @@ async def download_single(
 
         cs = cover_settings or {}
         out_ext = cs.get('output_format', 'mp4')
-        video_output = ensure_unique_path(
+        video_output = reserve_unique_file(
             download_dir / get_single_track_filename(artist, title, out_ext)
         )
+        _register_temp(download_id, 'stem', video_output)
 
         app_logger.info(
             f"Merging cover ({cover_file}) + audio ({downloaded_file}) -> {video_output}"
@@ -405,22 +433,23 @@ async def download_single(
                 "Cover+audio merge failed. Check FFmpeg is installed and the audio/image are valid."
             )
     else:
-        # Without a conversion step the real extension is only known now, so
-        # the output name is settled here rather than up front.
-        if keep_original:
-            real_ext = Path(downloaded_file).suffix.lstrip('.') or ext
-            output_path = ensure_unique_path(
-                download_dir / get_single_track_filename(artist, title, real_ext)
-            )
+        # Without a conversion step the real extension is only known now.
+        # The name is claimed right before the move, atomically — picked at
+        # the start, two downloads of the same song both got it (BE-028).
+        real_ext = (Path(downloaded_file).suffix.lstrip('.') or ext) if keep_original else ext
+        output_path = reserve_unique_file(
+            download_dir / get_single_track_filename(artist, title, real_ext)
+        )
 
         try:
             shutil.move(downloaded_file, str(output_path))
             final_path = str(output_path)
         except Exception:
-            try:
-                os.remove(downloaded_file)
-            except OSError:
-                pass
+            for leftover in (downloaded_file, str(output_path)):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
             raise
 
         # yt-dlp keeps the written thumbnail file next to the media after
@@ -581,6 +610,46 @@ _GONE_MARKERS = (
 def _is_permanently_gone(err: Exception) -> bool:
     message = str(err).lower()
     return any(marker in message for marker in _GONE_MARKERS)
+
+
+class _YdlErrorLog:
+    """yt-dlp logger that records errors instead of printing them.
+
+    With `ignoreerrors` set, a failed playlist entry is reported to the logger
+    and skipped — this is the only place the reason survives.
+    """
+
+    def __init__(self):
+        self.messages = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        self.messages.append(str(msg))
+        app_logger.warning(f"yt-dlp: {msg}")
+
+
+def _short_ydl_error(message: str) -> str:
+    text = (message or '').replace('ERROR: ', '', 1).strip()
+    return text[:160]
+
+
+_ALBUM_MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm',
+                     '.ogg', '.opus'}
+
+
+def _album_media_files(folder: Path) -> list:
+    return [
+        f for f in folder.iterdir()
+        if f.is_file() and f.suffix.lower() in _ALBUM_MEDIA_EXTS
+    ] if folder.is_dir() else []
 
 
 async def _download_each_track(
@@ -851,20 +920,27 @@ async def download_playlist(
                 merge_ext = Path(downloaded_files[0]).suffix.lstrip('.') or ext
                 merge_bitrate = ''
 
+            # The engine reports its own 0-100; fitted into what's left of the
+            # bar so it doesn't jump from 75% back to 10% (BE-023).
+            merge_progress = _scaled_progress(progress_callback, 75, 99)
+
             output_filename = get_album_filename(artist, album, merge_ext)
-            output_path = ensure_unique_path(download_dir / output_filename)
+            output_path = reserve_unique_file(download_dir / output_filename)
+            # Until the job succeeds the merged file is a leftover to remove
+            # on cancel or failure, like the temp dir it is built from (BE-024).
+            _register_temp(download_id, 'stem', output_path)
 
             if download_type == 'audio':
                 ok = await concatenate_audio(
                     downloaded_files, str(output_path), downloaded_tracks,
-                    add_chapters=True, progress_callback=progress_callback,
+                    add_chapters=True, progress_callback=merge_progress,
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
                     bitrate=merge_bitrate,
                 )
             elif download_type == 'video':
                 ok = await concatenate_video(
                     downloaded_files, str(output_path), fmt,
-                    progress_callback=progress_callback,
+                    progress_callback=merge_progress,
                     crossfade=crossfade, crossfade_duration=crossfade_duration,
                     tracks_meta=downloaded_tracks,
                 )
@@ -883,7 +959,7 @@ async def download_playlist(
                     cover_ratio=cover_settings.get('ratio', '1:1') if cover_settings else '1:1',
                     cover_resolution=cover_settings.get('resolution', 'original') if cover_settings else 'original',
                     add_chapters=True,
-                    progress_callback=progress_callback,
+                    progress_callback=merge_progress,
                     crossfade=crossfade,
                     crossfade_duration=crossfade_duration,
                 )
@@ -944,7 +1020,10 @@ async def download_playlist(
         # Reserve atomically: two downloads of the same album must never share
         # a directory (BE-003), and mkdir is the only portable atomic create.
         album_folder = reserve_playlist_folder(download_dir, artist, album)
-        _register_temp(download_id, 'partials', album_folder)
+        # The whole folder is temporary until the download succeeds. A failed
+        # attempt's finished tracks used to stay behind: the retry reserves a
+        # fresh "(1)" folder and nothing records the first one (BE-021).
+        _register_temp(download_id, 'dir', album_folder)
 
         # Tracks matched one-by-one to unrelated sources (a Spotify album, whose
         # songs each live on a different YouTube upload) have no single playlist
@@ -969,6 +1048,16 @@ async def download_playlist(
             if selected_indices:
                 # Tell yt-dlp to fetch only the ticked tracks rather than the album.
                 ydl_opts['playlist_items'] = ','.join(str(i) for i in selected_indices)
+            else:
+                # The tracklist was capped at MAX_PLAYLIST_TRACKS when it was
+                # read; the download has to stop at the same place (BE-025).
+                ydl_opts['playlistend'] = settings.MAX_PLAYLIST_TRACKS
+            # One private, deleted or region-locked video must not abort the
+            # rest of the album. As a library yt-dlp raises on the first bad
+            # entry unless told otherwise — its CLI defaults to this (BE-020).
+            ydl_opts['ignoreerrors'] = 'only_download'
+            track_errors = _YdlErrorLog()
+            ydl_opts['logger'] = track_errors
 
             loop = asyncio.get_running_loop()
             completed = [0]
@@ -1025,6 +1114,20 @@ async def download_playlist(
 
             _check_cancelled(download_id)
             await loop.run_in_executor(None, _download)
+            _check_cancelled(download_id)
+
+            if track_errors.messages:
+                if not _album_media_files(album_folder):
+                    # Nothing came down at all — surface yt-dlp's own reason so
+                    # the queue can still tell a dead album from a flaky network.
+                    raise RuntimeError(track_errors.messages[0])
+                skipped = len(track_errors.messages)
+                await _warn(
+                    progress_callback,
+                    f"{skipped} track(s) could not be downloaded and were "
+                    f"skipped: {_short_ydl_error(track_errors.messages[0])}"
+                    + (" (and others)" if skipped > 1 else "")
+                )
 
         IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
@@ -1178,12 +1281,7 @@ async def download_playlist(
                                 genre=metadata.get('genre', '') or '',
                             )
 
-        MEDIA_EXTS = {'.mp3', '.flac', '.m4a', '.aac', '.mp4', '.mkv', '.webm',
-                      '.ogg', '.opus'}
-        files = [
-            f for f in album_folder.iterdir()
-            if f.is_file() and f.suffix.lower() in MEDIA_EXTS
-        ]
+        files = _album_media_files(album_folder)
 
         if not files:
             import shutil
