@@ -157,7 +157,21 @@ from a browser that is logged in to YouTube:
    updating Median; afterwards, swapping in a fresh `cookies.txt` only needs
    `docker compose restart median`.
 
-`/api/health` shows `"youtube_cookies": true` once they are loaded. Median
+`/api/health` shows `"youtube_cookies": true` once they are loaded (the Help
+window shows it too).
+
+**Still seeing yt-dlp's raw "Use --cookies-from-browser" text in the page?**
+Then the container isn't running the current code: Median replaces that text
+with its own advice. Compare the running build with your checkout:
+
+```bash
+git log -1 --format=%h                        # the commit you pulled
+curl -s localhost:8080/api/health | grep -o '"build":"[^"]*"'
+```
+
+If they differ (or `build` is missing), rebuild from that same folder:
+`GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build`
+(`./startup.sh` sets `GIT_COMMIT` for you). Median
 only reads the file and never writes to it. Cookies expire eventually; when
 the error comes back, export a fresh file. The cookies give access to that
 YouTube account, so a spare account is a good idea. `cookies/` is gitignored.

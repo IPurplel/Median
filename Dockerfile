@@ -54,6 +54,10 @@ USER median
 
 EXPOSE 5000
 
+# Commit this image was built from, reported by /api/health and the Help window.
+ARG GIT_COMMIT=unknown
+ENV MEDIAN_BUILD=$GIT_COMMIT
+
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

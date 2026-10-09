@@ -1281,3 +1281,17 @@ def test_be040_probe_failure_warning_carries_the_advice(monkeypatch):
     meta = {'is_playlist': True, 'tracks': [{'title': 'A'}, {'title': 'B'}]}
     asyncio.run(queue_manager._resolve_spotify_matches(meta, 'u', cb))
     assert any('YTDLP_COOKIES_FILE' in w for w in warnings)
+
+
+# ── Build shown in /api/health ───────────────────────────────────────────────
+
+def test_health_reports_the_running_build(monkeypatch):
+    from fastapi.testclient import TestClient
+    from backend.app import app
+    client = TestClient(app)
+    monkeypatch.delenv('MEDIAN_BUILD', raising=False)
+    assert client.get('/api/health').json()['build'] == 'dev'
+    monkeypatch.setenv('MEDIAN_BUILD', 'abc1234')
+    body = client.get('/api/health').json()
+    assert body['build'] == 'abc1234'
+    assert 'youtube_cookies' in body

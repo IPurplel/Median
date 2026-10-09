@@ -65,6 +65,9 @@ else
   ok ".env found"
 fi
 
+# Baked into the image so /api/health shows which commit is running.
+export GIT_COMMIT="${GIT_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+
 step "Building Docker images (first run may take 2-3 minutes)..."
 if docker compose build --quiet 2>/dev/null || docker-compose build --quiet 2>/dev/null; then
   ok "Docker images ready"

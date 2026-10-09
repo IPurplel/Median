@@ -491,6 +491,9 @@ async def health():
         "js_runtime_available": js_runtime_available,
         "youtube_challenges_ok": ejs_available and js_runtime_available,
         "youtube_cookies": bool(cookies_file()),
+        # The commit the image was built from (Dockerfile GIT_COMMIT), so a
+        # stale container can be told apart from a fresh one.
+        "build": os.environ.get("MEDIAN_BUILD") or "dev",
         "active_downloads": len(active_downloads),
         "timestamp": datetime.now().isoformat(),
     }
