@@ -1564,7 +1564,22 @@ async function checkPlatforms() {
 }
 
 // ── HELP MODAL ────────────────────────────────────────────────────────────────
-$('#btn-help').addEventListener('click', () => $('#help-modal').classList.remove('hidden'));
+$('#btn-help').addEventListener('click', () => {
+  $('#help-modal').classList.remove('hidden');
+  showBuildInfo();
+});
+
+// Which build is running and whether YouTube cookies loaded — answers "did my
+// update/cookies actually take effect?" without a terminal.
+async function showBuildInfo() {
+  const el = $('#build-info');
+  try {
+    const h = await api('GET', '/api/health');
+    el.textContent = `Build ${h.build || 'unknown'} · YouTube cookies: ${h.youtube_cookies ? 'loaded' : 'not set'}`;
+  } catch (_) {
+    el.textContent = '';
+  }
+}
 
 // ── CLEAN NOW ─────────────────────────────────────────────────────────────────
 // Escape hatch for a full disk: deletes every finished download immediately
